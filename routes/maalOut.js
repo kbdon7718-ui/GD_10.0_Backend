@@ -1,0 +1,321 @@
+// routes/maalOut.js
+import express from "express";
+import { pool } from "../config/db.js";
+
+const router = express.Router();
+
+/* ===============================================================
+   1) ADD SALE
+================================================================*/
+router.post("/add-sale", async (req, res) => {
+  try {
+    const {
+      company_id,
+      godown_id,
+      firm_name,
+      bill_to,
+      ship_to,
+      date,
+      weight,
+      bill_rate,
+      original_rate,
+      gst_percent,
+      freight,
+      vehicle_no,
+      freight_payment_status,
+    } = req.body;
+
+    const bill_amount = Number(weight) * Number(bill_rate);
+    const original_amount = Number(weight) * Number(original_rate);
+    const gst_amount = (bill_amount * Number(gst_percent)) / 100;
+
+    const q = `
+      INSERT INTO maal_out
+      (id, company_id, godown_id, firm_name, bill_to, ship_to, date,
+        weight, bill_rate, bill_amount, original_rate, original_amount,
+        gst_percent, gst_amount, freight, freight_payment_status,
+        vehicle_no, created_at)
+      VALUES 
+      (uuid_generate_v4(), $1,$2,$3,$4,$5,$6::date,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
+      RETURNING *;
+    `;
+
+    const result = await pool.query(q, [
+      company_id,
+      godown_id,
+      firm_name,
+      bill_to,
+      ship_to,
+      date,
+      weight,
+      bill_rate,
+      bill_amount,
+      original_rate,
+      original_amount,
+      gst_percent,
+      gst_amount,
+      freight,
+      freight_payment_status,
+      vehicle_no,
+    ]);
+
+    res.json({ success: true, sale: result.rows[0] });
+  } catch (err) {
+    console.error("ADD SALE ERROR:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ===============================================================
+   2) UPDATE SALE
+================================================================*/
+router.put("/update-sale/:id", async (req, res) => {
+  try {
+    const saleId = req.params.id;
+
+    const {
+      firm_name,
+      bill_to,
+      ship_to,
+      date,
+      weight,
+      bill_rate,
+      original_rate,
+      gst_percent,
+      freight,
+      vehicle_no,
+      freight_payment_status,
+    } = req.body;
+
+    const bill_amount = Number(weight) * Number(bill_rate);
+    const original_amount = Number(weight) * Number(original_rate);
+    const gst_amount = (bill_amount * Number(gst_percent)) / 100;
+
+    const q = `
+      UPDATE maal_out
+      SET firm_name=$1, bill_to=$2, ship_to=$3, date=$4::date,
+          weight=$5, bill_rate=$6, bill_amount=$7,
+          original_rate=$8, original_amount=$9,
+          gst_percent=$10, gst_amount=$11,
+          freight=$12, freight_payment_status=$13,
+          vehicle_no=$14
+      WHERE id=$15
+      RETURNING *;
+    `;
+
+    const result = await pool.query(q, [
+      firm_name,
+      bill_to,
+      ship_to,
+      date,
+      weight,
+      bill_rate,
+      bill_amount,
+      original_rate,
+      original_amount,
+      gst_percent,
+      gst_amount,
+      freight,
+      freight_payment_status,
+      vehicle_no,
+      saleId,
+    ]);
+
+    res.json({ success: true, sale: result.rows[0] });
+  } catch (err) {
+    console.error("UPDATE SALE ERROR:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ===============================================================
+   3) DELETE SALE
+================================================================*/
+router.delete("/delete-sale/:id", async (req, res) => {
+  try {
+    const saleId = req.params.id;
+
+    const result = await pool.query(
+      `DELETE FROM maal_out WHERE id=$1 RETURNING id`,
+      [saleId]
+    );
+
+    if (!result.rowCount)
+      return res
+        .status(404)
+        .json({ success: false, error: "Sale not found" });
+
+    res.json({ success: true, message: "Sale deleted" });
+  } catch (err) {
+    console.error("DELETE SALE ERROR:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ===============================================================
+   4) LIST SALES (month OR date)
+================================================================*/
+router.get("/list-sales", async (req, res) => {
+  try {
+    const { company_id, godown_id, date, month } = req.query;
+
+    if (!company_id || !godown_id)
+      return res.status(400).json({
+        success: false,
+        error: "company_id and godown_id required",
+      });
+
+    const params = [company_id, godown_id];
+    let where = `company_id=$1 AND godown_id=$2`;
+
+    if (month) {
+      params.push(month);
+      where += ` AND TO_CHAR(date, 'YYYY-MM') = $${params.length}`;
+    } else if (date) {
+      params.push(date);
+      where += ` AND date = $${params.length}::date`;
+    }
+
+    const q = `
+      SELECT *,
+      (COALESCE(original_amount,0)+COALESCE(gst_amount,0)) AS total_invoice_amount
+      FROM maal_out
+      WHERE ${where}
+      ORDER BY date DESC, created_at DESC;
+    `;
+
+    const rows = await pool.query(q, params);
+
+    res.json({ success: true, sales: rows.rows });
+  } catch (err) {
+    console.error("LIST SALES ERROR:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ===============================================================
+   5) ADD PAYMENT
+================================================================*/
+router.post("/add-payment", async (req, res) => {
+  try {
+    const {
+      company_id,
+      godown_id,
+      firm_name,
+      amount,
+      date,
+      maal_out_id = null,
+      mode = null,
+      note = null,
+    } = req.body;
+
+    const q = `
+      INSERT INTO maal_out_payments
+      (id, company_id, godown_id, firm_name, amount, date, maal_out_id, mode, note, created_at)
+      VALUES (uuid_generate_v4(), $1,$2,$3,$4,$5::date,$6,$7,$8,NOW())
+      RETURNING *;
+    `;
+
+    const result = await pool.query(q, [
+      company_id,
+      godown_id,
+      firm_name,
+      amount,
+      date,
+      maal_out_id,
+      mode,
+      note,
+    ]);
+
+    res.json({ success: true, payment: result.rows[0] });
+  } catch (err) {
+    console.error("ADD PAYMENT ERROR:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ===============================================================
+   6) UPDATE PAYMENT
+================================================================*/
+router.put("/update-payment/:id", async (req, res) => {
+  try {
+    const paymentId = req.params.id;
+    const { firm_name, amount, date } = req.body;
+
+    const q = `
+      UPDATE maal_out_payments
+      SET firm_name=$1, amount=$2, date=$3::date
+      WHERE id=$4
+      RETURNING *;
+    `;
+
+    const result = await pool.query(q, [
+      firm_name,
+      amount,
+      date,
+      paymentId,
+    ]);
+
+    res.json({ success: true, payment: result.rows[0] });
+  } catch (err) {
+    console.error("UPDATE PAYMENT ERROR:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ===============================================================
+   7) DELETE PAYMENT
+================================================================*/
+router.delete("/delete-payment/:id", async (req, res) => {
+  try {
+    const paymentId = req.params.id;
+
+    const q = `DELETE FROM maal_out_payments WHERE id=$1 RETURNING id`;
+    const r = await pool.query(q, [paymentId]);
+
+    if (!r.rowCount)
+      return res
+        .status(404)
+        .json({ success: false, error: "Payment not found" });
+
+    res.json({ success: true, message: "Payment deleted" });
+  } catch (err) {
+    console.error("DELETE PAYMENT ERROR:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ===============================================================
+   8) LIST PAYMENTS (month OR date)
+================================================================*/
+router.get("/list-payments", async (req, res) => {
+  try {
+    const { company_id, godown_id, date, month } = req.query;
+
+    const params = [company_id, godown_id];
+    let where = `company_id=$1 AND godown_id=$2`;
+
+    if (month) {
+      params.push(month);
+      where += ` AND TO_CHAR(date, 'YYYY-MM') = $${params.length}`;
+    } else if (date) {
+      params.push(date);
+      where += ` AND date = $${params.length}::date`;
+    }
+
+    const q = `
+      SELECT *
+      FROM maal_out_payments
+      WHERE ${where}
+      ORDER BY date DESC, created_at DESC;
+    `;
+
+    const rows = await pool.query(q, params);
+    res.json({ success: true, payments: rows.rows });
+  } catch (err) {
+    console.error("LIST PAYMENTS ERROR:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+export default router;
