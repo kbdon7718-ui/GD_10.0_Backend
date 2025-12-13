@@ -311,5 +311,90 @@ router.get("/balances", async (req, res) => {
     res.status(500).json({ error: "Failed to load balances" });
   }
 });
+/* --------------------------------------------------------
+   6️⃣ OWNER — FERIWALA LEDGER (NOTEBOOK VIEW)
+-------------------------------------------------------- */
+router.get("/ledger", async (req, res) => {
+  try {
+    const { company_id, godown_id, vendor_id } = req.query;
+
+    if (!company_id || !godown_id || !vendor_id) {
+      return res.status(400).json({ error: "Missing required params" });
+    }
+
+    /* =========================
+       FETCH PURCHASES (CREDIT)
+    ========================= */
+    const purchases = await pool.query(
+      `
+      SELECT 
+        fr.date,
+        'purchase' AS type,
+        'Maal Purchase' AS description,
+        fr.total_amount AS amount
+      FROM feriwala_records fr
+      WHERE fr.company_id = $1
+        AND fr.godown_id = $2
+        AND fr.vendor_id = $3
+      `,
+      [company_id, godown_id, vendor_id]
+    );
+
+    /* =========================
+       FETCH PAYMENTS (DEBIT)
+    ========================= */
+    const payments = await pool.query(
+      `
+      SELECT 
+        fw.date,
+        'payment' AS type,
+        COALESCE(fw.note, 'Payment') AS description,
+        fw.amount
+      FROM feriwala_withdrawals fw
+      WHERE fw.company_id = $1
+        AND fw.godown_id = $2
+        AND fw.vendor_id = $3
+      `,
+      [company_id, godown_id, vendor_id]
+    );
+
+    /* =========================
+       MERGE + SORT
+    ========================= */
+    const ledger = [...purchases.rows, ...payments.rows].sort(
+      (a, b) => new Date(a.date) - new Date(b.date)
+    );
+
+    /* =========================
+       RUNNING BALANCE
+       purchase = credit (+)
+       payment  = debit  (-)
+    ========================= */
+    let runningBalance = 0;
+
+    const ledgerWithBalance = ledger.map((row) => {
+      if (row.type === "purchase") {
+        runningBalance += Number(row.amount);
+      } else {
+        runningBalance -= Number(row.amount);
+      }
+
+      return {
+        ...row,
+        balance: runningBalance,
+      };
+    });
+
+    res.json({
+      success: true,
+      ledger: ledgerWithBalance,
+      outstanding: runningBalance,
+    });
+  } catch (err) {
+    console.error("❌ Feriwala Ledger Error:", err);
+    res.status(500).json({ error: "Failed to load ledger" });
+  }
+});
+
 
 export default router;
