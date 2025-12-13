@@ -34,39 +34,196 @@ router.get("/accounts", async (req, res) => {
 /* =========================================================
    GET ROKADI TRANSACTIONS (Ledger)
 ========================================================= */
-router.get("/transactions", async (req, res) => {
-  try {
-    const { company_id, godown_id, account_id, date } = req.query;
+/* =========================================================
+   ADD ROKADI TRANSACTION
+   ✅ MANUAL ENTRY = CREDIT ONLY
+========================================================= */
+router.post("/add", async (req, res) => {
+  const client = await pool.connect();
 
-    if (!company_id || !godown_id || !account_id) {
-      return res.status(400).json({ error: "Missing required params" });
+  try {
+    const {
+      company_id,
+      godown_id,
+      account_id,
+      type,
+      amount,
+      category = "manual cash",
+      reference = "",
+      created_by = null,
+      date, // allow past date
+    } = req.body;
+
+    /* ---------- VALIDATION ---------- */
+    if (!company_id || !godown_id || !account_id || !amount) {
+      return res.status(400).json({ error: "Missing required fields" });
     }
 
-    const result = await pool.query(
+    if (amount <= 0) {
+      return res.status(400).json({ error: "Amount must be > 0" });
+    }
+
+    // 🔒 HARD RULE
+    if (type !== "credit") {
+      return res.status(400).json({
+        error: "Only CREDIT entries are allowed manually",
+      });
+    }
+
+    await client.query("BEGIN");
+
+    /* ---------- INSERT TRANSACTION ---------- */
+    await client.query(
       `
-      SELECT
+      INSERT INTO rokadi_transactions
+      (
         id,
+        account_id,
+        company_id,
+        godown_id,
         type,
         amount,
         category,
         reference,
-        created_at::date AS date
-      FROM rokadi_transactions
-      WHERE company_id = $1
-        AND godown_id = $2
-        AND account_id = $3
-        AND ($4::date IS NULL OR created_at::date = $4::date)
-      ORDER BY created_at DESC
+        created_by,
+        created_at
+      )
+      VALUES
+      (
+        uuid_generate_v4(),
+        $1,$2,$3,'credit',$4,$5,$6,$7,$8
+      )
       `,
-      [company_id, godown_id, account_id, date || null]
+      [
+        account_id,
+        company_id,
+        godown_id,
+        amount,
+        category,
+        reference,
+        created_by,
+        date ? `${date} 00:00:00` : new Date(),
+      ]
     );
 
-    res.json({ success: true, transactions: result.rows });
+    /* ---------- UPDATE BALANCE ---------- */
+    await client.query(
+      `UPDATE rokadi_accounts SET balance = balance + $1 WHERE id = $2`,
+      [amount, account_id]
+    );
+
+    await client.query("COMMIT");
+
+    res.json({
+      success: true,
+      message: "Cash credited successfully",
+    });
   } catch (err) {
-    console.error("❌ ROKADI TX:", err.message);
+    await client.query("ROLLBACK");
+    console.error("❌ ROKADI ADD:", err.message);
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
+
+
+
+
+/* =========================================================
+   AUTO DEBIT BY PAYMENT MODE
+========================================================= */
+router.post("/debit", async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const {
+      company_id,
+      godown_id,
+      amount,
+      payment_mode, // cash | upi | bank
+      category,
+      reference = "",
+      date,
+    } = req.body;
+
+    if (!company_id || !godown_id || !amount || !payment_mode) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    if (amount <= 0) {
+      return res.status(400).json({ error: "Amount must be > 0" });
+    }
+
+    await client.query("BEGIN");
+
+    /* ---------- FIND ACCOUNT AUTOMATICALLY ---------- */
+    const accountType = payment_mode === "cash" ? "cash" : "bank";
+
+    const accRes = await client.query(
+      `
+      SELECT id, balance
+      FROM rokadi_accounts
+      WHERE company_id = $1
+        AND godown_id = $2
+        AND account_type = $3
+      LIMIT 1
+      `,
+      [company_id, godown_id, accountType]
+    );
+
+    if (accRes.rowCount === 0) {
+      throw new Error(`${accountType} account not found`);
+    }
+
+    const account = accRes.rows[0];
+
+    if (account.balance < amount) {
+      throw new Error("Insufficient balance");
+    }
+
+    /* ---------- INSERT TRANSACTION ---------- */
+    await client.query(
+      `
+      INSERT INTO rokadi_transactions
+      (id, account_id, company_id, godown_id,
+       type, amount, category, reference, created_at)
+      VALUES
+      (uuid_generate_v4(), $1, $2, $3,
+       'debit', $4, $5, $6, $7)
+      `,
+      [
+        account.id,
+        company_id,
+        godown_id,
+        amount,
+        category,
+        reference,
+        date ? `${date} 00:00:00` : new Date(),
+      ]
+    );
+
+    /* ---------- UPDATE BALANCE ---------- */
+    await client.query(
+      `UPDATE rokadi_accounts SET balance = balance - $1 WHERE id = $2`,
+      [amount, account.id]
+    );
+
+    await client.query("COMMIT");
+
+    res.json({
+      success: true,
+      message: `₹${amount} debited from ${accountType}`,
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("❌ ROKADI DEBIT:", err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 
 /* =========================================================
    ADD ROKADI TRANSACTION

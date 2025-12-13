@@ -82,26 +82,64 @@ router.post("/", async (req, res) => {
     }
 
     // Account transaction
-    await client.query(
-      `
-      INSERT INTO account_transactions
-      (id, company_id, godown_id, account_id, type, amount, category, reference, metadata, created_at)
-      VALUES (uuid_generate_v4(), $1, $2, $3, 'debit', $4, 'expense', $5, '{}', NOW());
-      `,
-      [
-        company_id,
-        godown_id,
-        account_id,
-        amount,
-        `Paid to ${paid_to} (${description || "expense"})`,
-      ]
-    );
+    /* =====================================================
+   🔻 AUTO DEBIT ROKADI ON EXPENSE
+===================================================== */
 
-    await client.query(
-      `UPDATE accounts SET balance = balance - $1 WHERE id = $2;`,
-      [amount, account_id]
-    );
+// decide source: cash or bank
+const rokadiAccountType =
+  payment_mode && payment_mode.toLowerCase() === "cash"
+    ? "cash"
+    : "bank";
 
+// get rokadi account
+const rokadiAccResult = await client.query(
+  `
+  SELECT id, balance
+  FROM rokadi_accounts
+  WHERE company_id = $1
+    AND godown_id = $2
+    AND account_type = $3
+  LIMIT 1
+  `,
+  [company_id, godown_id, rokadiAccountType]
+);
+
+if (rokadiAccResult.rowCount === 0) {
+  throw new Error(`Rokadi ${rokadiAccountType} account not found`);
+}
+
+const rokadiAccountId = rokadiAccResult.rows[0].id;
+
+// insert rokadi transaction (DEBIT)
+await client.query(
+  `
+  INSERT INTO rokadi_transactions
+  (id, company_id, godown_id, account_id,
+   type, amount, category, reference, created_at)
+  VALUES
+  (uuid_generate_v4(), $1, $2, $3,
+   'debit', $4, 'expense', $5, NOW())
+  `,
+  [
+    company_id,
+    godown_id,
+    rokadiAccountId,
+    amount,
+    `Expense: ${paid_to} (${description || "daily expense"})`,
+  ]
+);
+
+// update rokadi balance
+await client.query(
+  `
+  UPDATE rokadi_accounts
+  SET balance = balance - $1
+  WHERE id = $2
+  `,
+  [amount, rokadiAccountId]
+);
+  
     await client.query("COMMIT");
 
     res.status(201).json({
