@@ -294,6 +294,78 @@ router.get("/salary/summary", async (req, res) => {
   }
 });
 
+/* ===================================================
+   🟠 6.5 Update Labour / Contractor (Owner)
+=================================================== */
+router.put("/:labour_id", async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { labour_id } = req.params;
+    const {
+      name,
+      contact,
+      role,
+      daily_wage,
+      monthly_salary,
+      per_kg_rate,
+      status,
+    } = req.body;
+
+    if (!labour_id) {
+      return res.status(400).json({ error: "Missing labour ID" });
+    }
+
+    await client.query("BEGIN");
+
+    const result = await client.query(
+      `
+      UPDATE labour
+      SET
+        name = $1,
+        contact = $2,
+        role = $3,
+        daily_wage = $4,
+        monthly_salary = $5,
+        per_kg_rate = $6,
+        status = COALESCE($7, status)
+      WHERE id = $8
+      RETURNING *;
+      `,
+      [
+        name,
+        contact,
+        role,
+        daily_wage || 0,
+        monthly_salary || 0,
+        per_kg_rate || 0,
+        status,
+        labour_id,
+      ]
+    );
+
+    if (result.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Labour not found" });
+    }
+
+    await client.query("COMMIT");
+
+    res.json({
+      success: true,
+      message: "Labour updated successfully",
+      labour: result.rows[0],
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("❌ Update Labour Error:", err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+
     /* ===================================================
    🔴 7. Delete Labour (Owner)
 =================================================== */
