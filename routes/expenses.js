@@ -13,26 +13,29 @@ router.post("/", async (req, res) => {
     const {
       company_id,
       godown_id,
-      account_id,
       category,
       description,
       amount,
       payment_mode,
       paid_to,
+      labour_id,     // ✅ NEW
       created_by,
     } = req.body;
 
-    if (!company_id || !godown_id || !account_id || !amount || !paid_to) {
+    if (!company_id || !godown_id || !amount || !paid_to) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
     await client.query("BEGIN");
 
+    /* ===============================
+       1️⃣ SAVE EXPENSE
+    =============================== */
     const expenseResult = await client.query(
       `
       INSERT INTO expenses 
-      (id, company_id, godown_id, date, category, description, amount, payment_mode, account_id, paid_to, created_by, created_at)
-      VALUES (uuid_generate_v4(), $1, $2, CURRENT_DATE, $3, $4, $5, $6, $7, $8, $9, NOW())
+      (id, company_id, godown_id, date, category, description, amount, payment_mode, paid_to, created_by, created_at)
+      VALUES (uuid_generate_v4(), $1, $2, CURRENT_DATE, $3, $4, $5, $6, $7, $8, NOW())
       RETURNING id;
       `,
       [
@@ -42,7 +45,6 @@ router.post("/", async (req, res) => {
         description || "No description",
         amount,
         payment_mode || "Cash",
-        account_id,
         paid_to,
         created_by || null,
       ]
@@ -50,96 +52,83 @@ router.post("/", async (req, res) => {
 
     const expenseId = expenseResult.rows[0].id;
 
-    // 🔍 Labour auto-entry
-    if (category === "Labour") {
-      const labourResult = await client.query(
+    /* ===============================
+       2️⃣ LABOUR WITHDRAWAL (AUTO)
+    =============================== */
+    if (category === "Labour" && labour_id) {
+      await client.query(
         `
-        SELECT id FROM labour 
-        WHERE LOWER(name) = LOWER($1)
-          AND company_id = $2
-          AND godown_id = $3
-        LIMIT 1
+        INSERT INTO labour_withdrawals
+        (id, company_id, godown_id, labour_id, date, amount, mode, type, created_at)
+        VALUES (uuid_generate_v4(), $1, $2, $3, CURRENT_DATE, $4, $5, 'salary', NOW());
         `,
-        [paid_to, company_id, godown_id]
+        [
+          company_id,
+          godown_id,
+          labour_id,
+          amount,
+          payment_mode || "cash",
+        ]
       );
-
-      if (labourResult.rowCount > 0) {
-        await client.query(
-          `
-          INSERT INTO labour_withdrawals
-          (id, company_id, godown_id, labour_id, date, amount, mode, type, created_at)
-          VALUES (uuid_generate_v4(), $1, $2, $3, CURRENT_DATE, $4, $5, 'salary', NOW());
-          `,
-          [
-            company_id,
-            godown_id,
-            labourResult.rows[0].id,
-            amount,
-            payment_mode || "cash",
-          ]
-        );
-      }
     }
 
-    // Account transaction
-    /* =====================================================
-   🔻 AUTO DEBIT ROKADI ON EXPENSE
-===================================================== */
+    /* ===============================
+       3️⃣ AUTO DEBIT ROKADI
+       Cash → cash_in_hand
+       UPI/Bank → bank
+    =============================== */
+    const rokadiAccountType =
+      payment_mode && payment_mode.toLowerCase() === "cash"
+        ? "cash"
+        : "bank";
 
-// decide source: cash or bank
-const rokadiAccountType =
-  payment_mode && payment_mode.toLowerCase() === "cash"
-    ? "cash"
-    : "bank";
+    const rokadiAccResult = await client.query(
+      `
+      SELECT id
+      FROM rokadi_accounts
+      WHERE company_id = $1
+        AND godown_id = $2
+        AND account_type = $3
+      LIMIT 1
+      `,
+      [company_id, godown_id, rokadiAccountType]
+    );
 
-// get rokadi account
-const rokadiAccResult = await client.query(
-  `
-  SELECT id, balance
-  FROM rokadi_accounts
-  WHERE company_id = $1
-    AND godown_id = $2
-    AND account_type = $3
-  LIMIT 1
-  `,
-  [company_id, godown_id, rokadiAccountType]
-);
+    if (rokadiAccResult.rowCount === 0) {
+      throw new Error(`Rokadi ${rokadiAccountType} account not found`);
+    }
 
-if (rokadiAccResult.rowCount === 0) {
-  throw new Error(`Rokadi ${rokadiAccountType} account not found`);
-}
+    const rokadiAccountId = rokadiAccResult.rows[0].id;
 
-const rokadiAccountId = rokadiAccResult.rows[0].id;
+    // ledger entry
+    await client.query(
+      `
+      INSERT INTO rokadi_transactions
+      (id, company_id, godown_id, account_id,
+       type, amount, category, reference, created_at)
+      VALUES
+      (uuid_generate_v4(), $1, $2, $3,
+       'debit', $4, 'expense', $5, NOW())
+      `,
+      [
+        company_id,
+        godown_id,
+        rokadiAccountId,
+        amount,
+        `Expense: ${paid_to} (${description || "daily expense"})`,
+      ]
+    );
 
-// insert rokadi transaction (DEBIT)
-await client.query(
-  `
-  INSERT INTO rokadi_transactions
-  (id, company_id, godown_id, account_id,
-   type, amount, category, reference, created_at)
-  VALUES
-  (uuid_generate_v4(), $1, $2, $3,
-   'debit', $4, 'expense', $5, NOW())
-  `,
-  [
-    company_id,
-    godown_id,
-    rokadiAccountId,
-    amount,
-    `Expense: ${paid_to} (${description || "daily expense"})`,
-  ]
-);
+    // update balance
+    await client.query(
+      `
+      UPDATE rokadi_accounts
+      SET balance = balance - $1
+      WHERE id = $2
+      `,
+      [amount, rokadiAccountId]
+    );
 
-// update rokadi balance
-await client.query(
-  `
-  UPDATE rokadi_accounts
-  SET balance = balance - $1
-  WHERE id = $2
-  `,
-  [amount, rokadiAccountId]
-);
-  
     await client.query("COMMIT");
 
     res.status(201).json({
@@ -149,32 +138,28 @@ await client.query(
     });
   } catch (err) {
     await client.query("ROLLBACK");
+    console.error("❌ EXPENSE ADD ERROR:", err.message);
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
   }
 });
 
-/**
- * 🧾 OWNER — Fetch Expenses (Exact Date)
- */
+/* ===================================================
+   OWNER — Fetch Expenses
+=================================================== */
 router.get("/list", async (req, res) => {
   try {
     const { company_id, godown_id, date } = req.query;
 
     const result = await pool.query(
       `
-      SELECT 
-        e.*,
-        a.name AS account_name,
-        u.name AS created_by_name
-      FROM expenses e
-      LEFT JOIN accounts a ON e.account_id = a.id
-      LEFT JOIN users u ON e.created_by = u.id
-      WHERE e.company_id = $1
-        AND e.godown_id = $2
-        AND ($3::date IS NULL OR e.date::date = $3::date)
-      ORDER BY e.created_at DESC;
+      SELECT *
+      FROM expenses
+      WHERE company_id = $1
+        AND godown_id = $2
+        AND ($3::date IS NULL OR date = $3::date)
+      ORDER BY created_at DESC;
       `,
       [company_id, godown_id, date || null]
     );
@@ -185,9 +170,9 @@ router.get("/list", async (req, res) => {
   }
 });
 
-/**
- * 📊 OWNER — Expense Summary
- */
+/* ===================================================
+   OWNER — Expense Summary
+=================================================== */
 router.get("/summary", async (req, res) => {
   const { company_id, godown_id, start_date, end_date } = req.query;
 
@@ -213,59 +198,6 @@ router.get("/summary", async (req, res) => {
   );
 
   res.json({ success: true, summary: result.rows[0] });
-});
-
-/**
- * ✏️ OWNER — Update Expense (EDIT)
- */
-router.put("/update/:id", async (req, res) => {
-  const { id } = req.params;
-  const { category, description, amount, paid_to } = req.body;
-
-  try {
-    const result = await pool.query(
-      `
-      UPDATE expenses
-      SET
-        category = $1,
-        description = $2,
-        amount = $3,
-        paid_to = $4,
-        updated_at = NOW()
-      WHERE id = $5
-      RETURNING *;
-      `,
-      [category, description, amount, paid_to, id]
-    );
-
-    if (result.rowCount === 0)
-      return res.status(404).json({ success: false, error: "Expense not found" });
-
-    res.json({ success: true, expense: result.rows[0] });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-/**
- * 🗑️ OWNER — Delete Expense
- */
-router.delete("/delete/:id", async (req, res) => {
-  const { id } = req.params;
-
-  try {
-    const result = await pool.query(
-      `DELETE FROM expenses WHERE id = $1 RETURNING *;`,
-      [id]
-    );
-
-    if (result.rowCount === 0)
-      return res.status(404).json({ error: "Expense not found" });
-
-    res.json({ success: true, message: "Expense deleted successfully" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 export default router;
