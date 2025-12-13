@@ -123,28 +123,57 @@ router.post("/add", async (req, res) => {
     );
 
     /* ---------- TRANSFER SECOND ENTRY ---------- */
-    if (type === "transfer" && related_account_id) {
-      await client.query(
-        `
-        INSERT INTO rokadi_transactions
-        (id, account_id, related_account_id, company_id, godown_id,
-         type, amount, category, reference, created_by, created_at)
-        VALUES
-        (uuid_generate_v4(), $1,$2,$3,$4,'credit',$5,$6,$7,$8,$9)
-        `,
-        [
-          related_account_id,
-          account_id,
-          company_id,
-          godown_id,
-          amount,
-          category,
-          reference,
-          created_by,
-          date ? `${date} 00:00:00` : new Date(),
-        ]
-      );
-    }
+   /* ---------- UPDATE BALANCES ---------- */
+if (type === "credit") {
+  await client.query(
+    `UPDATE rokadi_accounts SET balance = balance + $1 WHERE id = $2`,
+    [amount, account_id]
+  );
+}
+
+if (type === "debit") {
+  await client.query(
+    `UPDATE rokadi_accounts SET balance = balance - $1 WHERE id = $2`,
+    [amount, account_id]
+  );
+}
+
+if (type === "transfer" && related_account_id) {
+  // debit from source
+  await client.query(
+    `UPDATE rokadi_accounts SET balance = balance - $1 WHERE id = $2`,
+    [amount, account_id]
+  );
+
+  // credit to destination
+  await client.query(
+    `UPDATE rokadi_accounts SET balance = balance + $1 WHERE id = $2`,
+    [amount, related_account_id]
+  );
+
+  // ledger entry for destination
+  await client.query(
+    `
+    INSERT INTO rokadi_transactions
+    (id, account_id, related_account_id, company_id, godown_id,
+     type, amount, category, reference, created_by, created_at)
+    VALUES
+    (uuid_generate_v4(), $1,$2,$3,$4,'credit',$5,$6,$7,$8,$9)
+    `,
+    [
+      related_account_id,
+      account_id,
+      company_id,
+      godown_id,
+      amount,
+      category,
+      reference,
+      created_by,
+      date ? `${date} 00:00:00` : new Date(),
+    ]
+  );
+}
+
 
     await client.query("COMMIT");
 
