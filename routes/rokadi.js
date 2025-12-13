@@ -4,8 +4,7 @@ import { pool } from "../config/db.js";
 const router = express.Router();
 
 /* =========================================================
-   GET ROKADI ACCOUNTS (CASH IN HAND)
-   Used by RokadiUpdate.jsx
+   GET ROKADI ACCOUNTS (Cash + Bank)
 ========================================================= */
 router.get("/accounts", async (req, res) => {
   try {
@@ -15,29 +14,25 @@ router.get("/accounts", async (req, res) => {
       return res.status(400).json({ error: "company_id & godown_id required" });
     }
 
-    const q = `
-      SELECT
-        id,
-        account_name,
-        account_type,
-        balance
+    const result = await pool.query(
+      `
+      SELECT id, account_name, account_type, balance
       FROM rokadi_accounts
-      WHERE company_id = $1
-        AND godown_id = $2
+      WHERE company_id = $1 AND godown_id = $2
       ORDER BY created_at ASC
-    `;
+      `,
+      [company_id, godown_id]
+    );
 
-    const r = await pool.query(q, [company_id, godown_id]);
-
-    res.json({ success: true, accounts: r.rows });
+    res.json({ success: true, accounts: result.rows });
   } catch (err) {
-    console.error("❌ ROKADI ACCOUNTS ERROR:", err.message);
+    console.error("❌ ROKADI ACCOUNTS:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
 /* =========================================================
-   GET ROKADI TRANSACTIONS (LEDGER)
+   GET ROKADI TRANSACTIONS (Ledger)
 ========================================================= */
 router.get("/transactions", async (req, res) => {
   try {
@@ -47,7 +42,8 @@ router.get("/transactions", async (req, res) => {
       return res.status(400).json({ error: "Missing required params" });
     }
 
-    const q = `
+    const result = await pool.query(
+      `
       SELECT
         id,
         type,
@@ -61,40 +57,36 @@ router.get("/transactions", async (req, res) => {
         AND account_id = $3
         AND ($4::date IS NULL OR created_at::date = $4::date)
       ORDER BY created_at DESC
-    `;
+      `,
+      [company_id, godown_id, account_id, date || null]
+    );
 
-    const r = await pool.query(q, [
-      company_id,
-      godown_id,
-      account_id,
-      date || null,
-    ]);
-
-    res.json({ success: true, transactions: r.rows });
+    res.json({ success: true, transactions: result.rows });
   } catch (err) {
-    console.error("❌ ROKADI TX ERROR:", err.message);
+    console.error("❌ ROKADI TX:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
 /* =========================================================
    ADD ROKADI TRANSACTION
-   type = credit | debit | transfer
+   credit | debit | transfer
 ========================================================= */
 router.post("/add", async (req, res) => {
   const client = await pool.connect();
+
   try {
     const {
       company_id,
       godown_id,
       account_id,
       related_account_id = null,
-      type, // credit | debit | transfer
+      type,
       amount,
       category = "",
       reference = "",
       created_by = null,
-      date = new Date().toISOString().split("T")[0],
+      date, // allow past date
     } = req.body;
 
     if (!company_id || !godown_id || !account_id || !type || !amount) {
@@ -107,7 +99,7 @@ router.post("/add", async (req, res) => {
 
     await client.query("BEGIN");
 
-    /* -------- Insert transaction -------- */
+    /* ---------- MAIN ENTRY ---------- */
     await client.query(
       `
       INSERT INTO rokadi_transactions
@@ -115,7 +107,7 @@ router.post("/add", async (req, res) => {
        type, amount, category, reference, created_by, created_at)
       VALUES
       (uuid_generate_v4(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-    `,
+      `,
       [
         account_id,
         related_account_id,
@@ -126,45 +118,40 @@ router.post("/add", async (req, res) => {
         category,
         reference,
         created_by,
-        date,
+        date ? `${date} 00:00:00` : new Date(),
       ]
     );
 
-    /* -------- Update balances -------- */
-    if (type === "credit") {
-      await client.query(
-        `UPDATE rokadi_accounts SET balance = balance + $1 WHERE id = $2`,
-        [amount, account_id]
-      );
-    }
-
-    if (type === "debit") {
-      await client.query(
-        `UPDATE rokadi_accounts SET balance = balance - $1 WHERE id = $2`,
-        [amount, account_id]
-      );
-    }
-
+    /* ---------- TRANSFER SECOND ENTRY ---------- */
     if (type === "transfer" && related_account_id) {
-      // from account
       await client.query(
-        `UPDATE rokadi_accounts SET balance = balance - $1 WHERE id = $2`,
-        [amount, account_id]
-      );
-
-      // to account
-      await client.query(
-        `UPDATE rokadi_accounts SET balance = balance + $1 WHERE id = $2`,
-        [amount, related_account_id]
+        `
+        INSERT INTO rokadi_transactions
+        (id, account_id, related_account_id, company_id, godown_id,
+         type, amount, category, reference, created_by, created_at)
+        VALUES
+        (uuid_generate_v4(), $1,$2,$3,$4,'credit',$5,$6,$7,$8,$9)
+        `,
+        [
+          related_account_id,
+          account_id,
+          company_id,
+          godown_id,
+          amount,
+          category,
+          reference,
+          created_by,
+          date ? `${date} 00:00:00` : new Date(),
+        ]
       );
     }
 
     await client.query("COMMIT");
 
-    res.json({ success: true, message: "Rokadi updated successfully" });
+    res.json({ success: true, message: "Rokadi transaction added" });
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("❌ ROKADI ADD ERROR:", err);
+    console.error("❌ ROKADI ADD:", err.message);
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
