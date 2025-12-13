@@ -11,6 +11,10 @@ import feriwalaRoutes from "./routes/feriwala.js";
 import maalOutRoutes from "./routes/maalOut.js";
 import maalinRoutes from "./routes/maalIn.js";
 import truckRoutes from "./routes/truck.js";
+import rokadiRoutes from "./routes/rokadi.js";
+
+
+
 import ratesRoutes from "./routes/rates.js";
 // DB Connection
 import { pool } from "./config/db.js";
@@ -42,6 +46,7 @@ app.use("/api/feriwala", feriwalaRoutes);
 app.use("/api/maalout", maalOutRoutes);
 app.use("/api/maalin", maalinRoutes);
 app.use("/api/truck", truckRoutes);
+app.use("/api/rokadi", rokadiRoutes);
 app.use("/api/rates", ratesRoutes);
 
 // 🟠 404 Handler

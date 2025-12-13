@@ -196,44 +196,92 @@ router.get("/list-sales", async (req, res) => {
 /* ===============================================================
    5) ADD PAYMENT
 ================================================================*/
+// ADD PAYMENT (Mill → Rokadi BANK CREDIT)
 router.post("/add-payment", async (req, res) => {
+  const client = await pool.connect();
+
   try {
     const {
-      company_id,
-      godown_id,
       firm_name,
       amount,
       date,
-      maal_out_id = null,
-      mode = null,
-      note = null,
+      company_id,
+      godown_id,
     } = req.body;
 
-    const q = `
-      INSERT INTO maal_out_payments
-      (id, company_id, godown_id, firm_name, amount, date, maal_out_id, mode, note, created_at)
-      VALUES (uuid_generate_v4(), $1,$2,$3,$4,$5::date,$6,$7,$8,NOW())
-      RETURNING *;
-    `;
+    if (!firm_name || !amount || !company_id || !godown_id) {
+      return res.json({ success: false, error: "Missing fields" });
+    }
 
-    const result = await pool.query(q, [
-      company_id,
-      godown_id,
-      firm_name,
-      amount,
-      date,
-      maal_out_id,
-      mode,
-      note,
-    ]);
+    await client.query("BEGIN");
 
-    res.json({ success: true, payment: result.rows[0] });
+    /* ===========================
+       1️⃣ Save Mill Payment
+    ============================ */
+    const paymentResult = await client.query(
+      `
+      insert into maal_out_payments
+        (firm_name, amount, date, company_id, godown_id)
+      values ($1, $2, $3, $4, $5)
+      returning id
+      `,
+      [firm_name, amount, date, company_id, godown_id]
+    );
+
+    const paymentId = paymentResult.rows[0].id;
+
+    /* ===========================
+       2️⃣ Get BANK Rokadi Account
+    ============================ */
+    const bankAccountRes = await client.query(
+      `select get_bank_rokadi_account($1,$2) as account_id`,
+      [company_id, godown_id]
+    );
+
+    const rokadiAccountId = bankAccountRes.rows[0].account_id;
+
+    /* ===========================
+       3️⃣ Insert Rokadi CREDIT
+    ============================ */
+    await client.query(
+      `
+      insert into rokadi_transactions
+        (account_id, company_id, godown_id, type, amount, reference, category)
+      values
+        ($1, $2, $3, 'credit', $4, $5, 'mill_payment')
+      `,
+      [
+        rokadiAccountId,
+        company_id,
+        godown_id,
+        amount,
+        `Mill payment: ${firm_name}`,
+      ]
+    );
+
+    /* ===========================
+       4️⃣ Update Rokadi Balance
+    ============================ */
+    await client.query(
+      `
+      update rokadi_accounts
+      set balance = balance + $1
+      where id = $2
+      `,
+      [amount, rokadiAccountId]
+    );
+
+    await client.query("COMMIT");
+
+    res.json({ success: true, payment_id: paymentId });
   } catch (err) {
-    console.error("ADD PAYMENT ERROR:", err);
-    res.status(500).json({ success: false, error: err.message });
+    await client.query("ROLLBACK");
+    console.error(err);
+    res.json({ success: false, error: err.message });
+  } finally {
+    client.release();
   }
 });
-
 /* ===============================================================
    6) UPDATE PAYMENT
 ================================================================*/

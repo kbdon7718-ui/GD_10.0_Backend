@@ -394,4 +394,80 @@ router.post("/withdrawal", async (req, res) => {
   }
 });
 
+/* --------------------------------------------------------
+   OWNER — KABADIWALA LEDGER (NOTEBOOK VIEW)
+-------------------------------------------------------- */
+router.get("/ledger", async (req, res) => {
+  try {
+    const { company_id, godown_id, vendor_id } = req.query;
+
+    if (!company_id || !godown_id || !vendor_id) {
+      return res.status(400).json({ error: "Missing required params" });
+    }
+
+    /* PURCHASES (DEBIT — owner gives maal) */
+    const purchases = await pool.query(
+      `
+      SELECT
+        kr.date,
+        'purchase' AS type,
+        string_agg(
+          ks.material || ' (' || ks.weight || 'kg × ₹' || ks.rate || ')',
+          E'\n'
+        ) AS description,
+        kr.total_amount AS amount
+      FROM kabadiwala_records kr
+      JOIN kabadiwala_scraps ks ON ks.kabadiwala_id = kr.id
+      WHERE kr.company_id = $1
+        AND kr.godown_id = $2
+        AND kr.vendor_id = $3
+      GROUP BY kr.id, kr.date, kr.total_amount
+      `,
+      [company_id, godown_id, vendor_id]
+    );
+
+    /* PAYMENTS (CREDIT) */
+    const payments = await pool.query(
+      `
+      SELECT
+        p.date,
+        'payment' AS type,
+        COALESCE(p.note, 'Payment') AS description,
+        p.amount
+      FROM kabadiwala_payments p
+      JOIN kabadiwala_records kr ON kr.id = p.kabadiwala_id
+      WHERE kr.company_id = $1
+        AND kr.godown_id = $2
+        AND kr.vendor_id = $3
+      `,
+      [company_id, godown_id, vendor_id]
+    );
+
+    const ledger = [...purchases.rows, ...payments.rows].sort(
+      (a, b) => new Date(a.date) - new Date(b.date)
+    );
+
+    let runningBalance = 0;
+
+    const ledgerWithBalance = ledger.map((row) => {
+      if (row.type === "purchase") {
+        runningBalance += Number(row.amount);
+      } else {
+        runningBalance -= Number(row.amount);
+      }
+      return { ...row, balance: runningBalance };
+    });
+
+    res.json({
+      success: true,
+      ledger: ledgerWithBalance,
+      outstanding: runningBalance,
+    });
+  } catch (err) {
+    console.error("❌ KABADIWALA LEDGER ERROR:", err);
+    res.status(500).json({ error: "Failed to load ledger" });
+  }
+});
+
+
 export default router;
