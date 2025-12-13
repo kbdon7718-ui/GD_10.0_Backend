@@ -314,6 +314,9 @@ router.get("/balances", async (req, res) => {
 /* --------------------------------------------------------
    6️⃣ OWNER — FERIWALA LEDGER (NOTEBOOK VIEW)
 -------------------------------------------------------- */
+/* --------------------------------------------------------
+   6️⃣ OWNER — FERIWALA LEDGER (NOTEBOOK VIEW)
+-------------------------------------------------------- */
 router.get("/ledger", async (req, res) => {
   try {
     const { company_id, godown_id, vendor_id } = req.query;
@@ -324,18 +327,24 @@ router.get("/ledger", async (req, res) => {
 
     /* =========================
        FETCH PURCHASES (CREDIT)
+       with material + weight
     ========================= */
     const purchases = await pool.query(
       `
       SELECT 
         fr.date,
         'purchase' AS type,
-        'Maal Purchase' AS description,
+        string_agg(
+          fs.material || ' (' || fs.weight || 'kg)',
+          ', '
+        ) AS description,
         fr.total_amount AS amount
       FROM feriwala_records fr
+      JOIN feriwala_scraps fs ON fs.feriwala_id = fr.id
       WHERE fr.company_id = $1
         AND fr.godown_id = $2
         AND fr.vendor_id = $3
+      GROUP BY fr.id, fr.date, fr.total_amount
       `,
       [company_id, godown_id, vendor_id]
     );
