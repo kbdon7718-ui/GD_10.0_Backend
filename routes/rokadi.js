@@ -345,4 +345,48 @@ if (type === "transfer" && related_account_id) {
   }
 });
 
+/* =========================================================
+   GET ROKADI BANK HISTORY (READ ONLY)
+========================================================= */
+router.get("/history/bank", async (req, res) => {
+  try {
+    const { company_id, godown_id } = req.query;
+
+    if (!company_id || !godown_id) {
+      return res.status(400).json({
+        error: "company_id & godown_id required",
+      });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        rt.id,
+        rt.type,                 -- credit | debit
+        rt.amount,
+        rt.category,
+        rt.reference,
+        rt.created_at AS date,
+        ra.account_name
+      FROM rokadi_transactions rt
+      JOIN rokadi_accounts ra ON ra.id = rt.account_id
+      WHERE rt.company_id = $1
+        AND rt.godown_id = $2
+        AND ra.account_type = 'bank'
+      ORDER BY rt.created_at ASC
+      `,
+      [company_id, godown_id]
+    );
+
+    res.json({
+      success: true,
+      transactions: result.rows,
+    });
+  } catch (err) {
+    console.error("❌ ROKADI BANK HISTORY:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 export default router;
