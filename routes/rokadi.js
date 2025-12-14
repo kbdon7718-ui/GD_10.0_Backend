@@ -38,7 +38,7 @@ router.get("/accounts", async (req, res) => {
    ADD ROKADI TRANSACTION
    ✅ MANUAL ENTRY = CREDIT ONLY
 ========================================================= */
-router.post("/add", async (req, res) => {
+router.post("/add-manual", async (req, res) => {
   const client = await pool.connect();
 
   try {
@@ -307,7 +307,7 @@ if (type === "transfer" && related_account_id) {
     `UPDATE rokadi_accounts SET balance = balance + $1 WHERE id = $2`,
     [amount, related_account_id]
   );
-  */
+ 
 
   // ledger entry for destination
   await client.query(
@@ -330,7 +330,7 @@ if (type === "transfer" && related_account_id) {
       date ? `${date} 00:00:00` : new Date(),
     ]
   );
-}
+} */
 
 
     await client.query("COMMIT");
