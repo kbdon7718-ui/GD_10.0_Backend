@@ -11,7 +11,7 @@ import feriwalaRoutes from "./routes/feriwala.js";
 import maalOutRoutes from "./routes/maalOut.js";
 import maalinRoutes from "./routes/maalIn.js";
 import truckRoutes from "./routes/truck.js";
-import bankRoutes from "./routes/bank.js";
+//import bankRoutes from "./routes/bank.js";
 import rokadiRoutes from "./routes/rokadi.js";
 
 
@@ -48,7 +48,7 @@ app.use("/api/maalout", maalOutRoutes);
 app.use("/api/maalin", maalinRoutes);
 app.use("/api/truck", truckRoutes);
 app.use("/api/rokadi", rokadiRoutes);
-app.use("/api/bank", bankRoutes);
+//app.use("/api/bank", bankRoutes);
 
 app.use("/api/rates", ratesRoutes);
 
