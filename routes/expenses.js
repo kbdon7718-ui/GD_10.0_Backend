@@ -14,15 +14,15 @@ router.post("/", async (req, res) => {
       company_id,
       godown_id,
       date,
-      category,
+      category,        // Misc | Labour | Feriwala | Kabadiwala
       description,
       amount,
-      payment_mode,
+      payment_mode,    // Cash | UPI | Bank Transfer
       paid_to,
 
       labour_id,
       vendor_id,
-      vendor_type,
+      vendor_type,     // feriwala | kabadiwala
 
       created_by,
     } = req.body;
@@ -31,12 +31,16 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
+    if (Number(amount) <= 0) {
+      return res.status(400).json({ error: "Invalid amount" });
+    }
+
     await client.query("BEGIN");
 
     /* ===============================
        NORMALIZE PAYMENT MODE
     =============================== */
-    const pm = (payment_mode || "cash").toLowerCase();
+    const pm = (payment_mode || "cash").toLowerCase(); // cash | upi | bank transfer
 
     /* =====================================================
        1️⃣ SAVE EXPENSE (SOURCE OF TRUTH)
@@ -79,7 +83,7 @@ router.post("/", async (req, res) => {
         category,
         description || "",
         amount,
-        payment_mode || "Cash",
+        pm,
         paid_to || "",
         vendor_id || null,
         vendor_type || null,
@@ -178,6 +182,10 @@ router.post("/", async (req, res) => {
         ]
       );
 
+      if (kabRes.rowCount === 0) {
+        throw new Error("Kabadiwala vendor not found");
+      }
+
       await client.query(
         `
         INSERT INTO kabadiwala_payments
@@ -205,14 +213,15 @@ router.post("/", async (req, res) => {
        Cash → cash
        UPI / Bank Transfer → bank
     ===================================================== */
-    const rokadiType =
-      pm === "cash" ? "cash" : "bank";
+    const rokadiType = pm === "cash" ? "cash" : "bank";
 
     const rokadiRes = await client.query(
       `
       SELECT id
       FROM rokadi_accounts
-      WHERE company_id=$1 AND godown_id=$2 AND account_type=$3
+      WHERE company_id=$1
+        AND godown_id=$2
+        AND account_type=$3
       LIMIT 1
       `,
       [company_id, godown_id, rokadiType]
@@ -282,7 +291,8 @@ router.get("/list", async (req, res) => {
     `
     SELECT *
     FROM expenses
-    WHERE company_id=$1 AND godown_id=$2
+    WHERE company_id=$1
+      AND godown_id=$2
       AND ($3::date IS NULL OR date::date=$3::date)
     ORDER BY created_at DESC
     `,
@@ -303,10 +313,15 @@ router.get("/summary", async (req, res) => {
     SELECT
       COUNT(*) AS total_entries,
       COALESCE(SUM(amount),0) AS total_amount,
-      COALESCE(SUM(CASE WHEN LOWER(payment_mode)='cash' THEN amount ELSE 0 END),0) AS cash,
-      COALESCE(SUM(CASE WHEN LOWER(payment_mode) IN ('upi','bank','bank transfer') THEN amount ELSE 0 END),0) AS bank
+      COALESCE(
+        SUM(CASE WHEN payment_mode='cash' THEN amount ELSE 0 END),0
+      ) AS cash,
+      COALESCE(
+        SUM(CASE WHEN payment_mode IN ('upi','bank','bank transfer') THEN amount ELSE 0 END),0
+      ) AS bank
     FROM expenses
-    WHERE company_id=$1 AND godown_id=$2
+    WHERE company_id=$1
+      AND godown_id=$2
       AND date BETWEEN $3::date AND $4::date
     `,
     [
