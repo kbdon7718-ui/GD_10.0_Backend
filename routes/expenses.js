@@ -14,18 +14,15 @@ router.post("/", async (req, res) => {
       company_id,
       godown_id,
       date,
-      category,                // Normal | Labour | Feriwala | Kabadiwala
+      category,
       description,
       amount,
-      payment_mode,            // Cash | UPI | Bank
+      payment_mode,
       paid_to,
 
-      // labour
       labour_id,
-
-      // vendor
       vendor_id,
-      vendor_type,             // feriwala | kabadiwala
+      vendor_type,
 
       created_by,
     } = req.body;
@@ -35,6 +32,11 @@ router.post("/", async (req, res) => {
     }
 
     await client.query("BEGIN");
+
+    /* ===============================
+       NORMALIZE PAYMENT MODE
+    =============================== */
+    const pm = (payment_mode || "cash").toLowerCase();
 
     /* =====================================================
        1️⃣ SAVE EXPENSE (SOURCE OF TRUTH)
@@ -112,13 +114,13 @@ router.post("/", async (req, res) => {
           labour_id,
           date || new Date(),
           amount,
-          payment_mode || "cash",
+          pm,
         ]
       );
     }
 
     /* =====================================================
-       3️⃣ FERIWALA / KABADIWALA PAYMENT
+       3️⃣ FERIWALA PAYMENT
     ===================================================== */
     if (category === "Feriwala" && vendor_id) {
       await client.query(
@@ -146,8 +148,10 @@ router.post("/", async (req, res) => {
       );
     }
 
+    /* =====================================================
+       4️⃣ KABADIWALA PAYMENT
+    ===================================================== */
     if (category === "Kabadiwala" && vendor_id) {
-      // create placeholder kabadiwala record
       const kabRes = await client.query(
         `
         INSERT INTO kabadiwala_records
@@ -169,7 +173,7 @@ router.post("/", async (req, res) => {
           company_id,
           godown_id,
           date || new Date(),
-          payment_mode || "cash",
+          pm,
           vendor_id,
         ]
       );
@@ -189,7 +193,7 @@ router.post("/", async (req, res) => {
         [
           kabRes.rows[0].id,
           amount,
-          payment_mode || "cash",
+          pm,
           description || "",
           date || new Date(),
         ]
@@ -197,12 +201,12 @@ router.post("/", async (req, res) => {
     }
 
     /* =====================================================
-       4️⃣ ROKADI DEBIT (ONCE — HERE ONLY)
+       5️⃣ ROKADI DEBIT (ONLY ONCE)
+       Cash → cash
+       UPI / Bank Transfer → bank
     ===================================================== */
     const rokadiType =
-      payment_mode && payment_mode.toLowerCase() === "cash"
-        ? "cash"
-        : "bank";
+      pm === "cash" ? "cash" : "bank";
 
     const rokadiRes = await client.query(
       `
@@ -261,7 +265,7 @@ router.post("/", async (req, res) => {
     });
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("❌ EXPENSE ERROR:", err);
+    console.error("❌ EXPENSE ERROR:", err.message);
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
@@ -299,8 +303,8 @@ router.get("/summary", async (req, res) => {
     SELECT
       COUNT(*) AS total_entries,
       COALESCE(SUM(amount),0) AS total_amount,
-      COALESCE(SUM(CASE WHEN LOWER(payment_mode)='cash' THEN amount END),0) AS cash,
-      COALESCE(SUM(CASE WHEN LOWER(payment_mode) IN ('bank','bank transfer','upi') THEN amount END),0) AS bank
+      COALESCE(SUM(CASE WHEN LOWER(payment_mode)='cash' THEN amount ELSE 0 END),0) AS cash,
+      COALESCE(SUM(CASE WHEN LOWER(payment_mode) IN ('upi','bank','bank transfer') THEN amount ELSE 0 END),0) AS bank
     FROM expenses
     WHERE company_id=$1 AND godown_id=$2
       AND date BETWEEN $3::date AND $4::date
