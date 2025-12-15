@@ -1,227 +1,126 @@
-// backend/routes/maalin.js
-import express from "express";
-import { pool } from "../config/db.js";
-
-const router = express.Router();
-
 /* ==========================================================
-   1. CREATE MAAL_IN HEADER   (Manager Step 1)
+   6. UNIFIED MAAL IN (FERIWALA / KABADIWALA / LOCAL / FACTORY)
    ========================================================== */
-router.post("/", async (req, res) => {
+router.post("/unified", async (req, res) => {
+  const client = await pool.connect();
+
   try {
     const {
       company_id,
       godown_id,
+      vendor_type,   // feriwala | kabadiwala | local | factory
+      vendor_id,     // required for feriwala & kabadiwala
       date,
-      supplier_name,
-      source,
-      vehicle_number,
-      notes,
-      created_by
+      scraps,
+      note = ""
     } = req.body;
 
-    if (!company_id || !godown_id || !supplier_name || !date) {
+    if (!company_id || !godown_id || !vendor_type || !date || !scraps?.length) {
       return res.status(400).json({
         success: false,
-        error: "company_id, godown_id, supplier_name and date are required"
+        error: "Missing required fields"
       });
-    }
-
-    const q = `
-      INSERT INTO maal_in
-      (company_id, godown_id, date, supplier_name, source, vehicle_number, notes, created_by)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-      RETURNING *;
-    `;
-
-    const result = await pool.query(q, [
-      company_id,
-      godown_id,
-      date,
-      supplier_name,
-      source || "kabadiwala",
-      vehicle_number || null,
-      notes || null,
-      created_by || "manager"
-    ]);
-
-    return res.status(201).json({
-      success: true,
-      maal_in: result.rows[0]
-    });
-
-  } catch (err) {
-    console.error("❌ MaalIn Header Error:", err);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-
-/* ==========================================================
-   2. ADD MULTIPLE SCRAP ITEMS (Manager Step 2)
-   ========================================================== */
-router.post("/:id/items", async (req, res) => {
-  const client = await pool.connect();
-
-  try {
-    const { id } = req.params;
-    const { items } = req.body;
-
-    if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ success: false, error: "Items array required" });
     }
 
     await client.query("BEGIN");
 
-    // Insert each item
-    for (const it of items) {
+    /* =====================================
+       1. GET SUPPLIER NAME
+    ===================================== */
+    let supplier_name = vendor_type.toUpperCase();
+
+    if (vendor_type === "feriwala" || vendor_type === "kabadiwala") {
+      const vRes = await client.query(
+        `SELECT name FROM vendors WHERE id=$1`,
+        [vendor_id]
+      );
+      supplier_name = vRes.rows[0]?.name;
+    }
+
+    /* =====================================
+       2. CREATE MAAL_IN HEADER
+    ===================================== */
+    const maalRes = await client.query(
+      `INSERT INTO maal_in
+       (company_id, godown_id, date, supplier_name, source, notes, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,'manager')
+       RETURNING id`,
+      [
+        company_id,
+        godown_id,
+        date,
+        supplier_name,
+        vendor_type,
+        note
+      ]
+    );
+
+    const maal_in_id = maalRes.rows[0].id;
+
+    /* =====================================
+       3. INSERT MAAL_IN ITEMS
+    ===================================== */
+    for (const s of scraps) {
+      const matRes = await client.query(
+        `SELECT material_type FROM scrap_types WHERE id=$1`,
+        [s.scrap_type_id]
+      );
+
       await client.query(
         `INSERT INTO maal_in_items
-         (maal_in_id, material, weight, rate, amount)
-         VALUES ($1,$2,$3,$4,$5);`,
-        [id, it.material, it.weight, it.rate, it.amount]
+         (maal_in_id, material, weight)
+         VALUES ($1,$2,$3)`,
+        [maal_in_id, matRes.rows[0].material_type, s.weight]
       );
     }
 
-    // Recalculate total
-    const total = await client.query(
-      `SELECT SUM(amount) AS total FROM maal_in_items WHERE maal_in_id=$1`,
-      [id]
-    );
+    /* =====================================
+       4. PERSONAL LEDGER ENTRY
+    ===================================== */
 
-    await client.query(
-      `UPDATE maal_in SET total_amount=$1 WHERE id=$2`,
-      [total.rows[0].total || 0, id]
-    );
+    // FERIWALA
+    if (vendor_type === "feriwala") {
+      await client.query(
+        `INSERT INTO feriwala_records
+         (id, company_id, godown_id, vendor_id, date, created_at)
+         VALUES (uuid_generate_v4(),$1,$2,$3,$4,NOW())`,
+        [company_id, godown_id, vendor_id, date]
+      );
+    }
+
+    // KABADIWALA (purchase only, payment later)
+    if (vendor_type === "kabadiwala") {
+      await client.query(
+        `INSERT INTO kabadiwala_records
+         (id, company_id, godown_id, vendor_id, kabadiwala_name,
+          date, total_amount, payment_status, created_at)
+         VALUES (uuid_generate_v4(),$1,$2,$3,$4,$5,0,'pending',NOW())`,
+        [
+          company_id,
+          godown_id,
+          vendor_id,
+          supplier_name,
+          date
+        ]
+      );
+    }
 
     await client.query("COMMIT");
 
     return res.json({
       success: true,
-      message: "Items added successfully & total updated"
+      maal_in_id,
+      message: "Unified Maal In saved successfully"
     });
 
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("❌ MaalIn Items Error:", err);
-    return res.status(500).json({ success: false, error: err.message });
+    console.error("❌ Unified MaalIn Error:", err);
+    return res.status(500).json({
+      success: false,
+      error: err.message
+    });
   } finally {
     client.release();
   }
 });
-
-
-/* ==========================================================
-   3. LIST MAAL IN (Owner View)
-   ========================================================== */
-router.get("/list", async (req, res) => {
-  try {
-    const { company_id, godown_id, date } = req.query;
-
-    if (!company_id || !godown_id) {
-      return res.status(400).json({
-        success: false,
-        error: "company_id and godown_id required"
-      });
-    }
-
-    const params = [company_id, godown_id];
-    let where = `WHERE company_id=$1 AND godown_id=$2`;
-
-    if (date) {
-      params.push(date);
-      where += ` AND date=$${params.length}`;
-    }
-
-    const q = `
-      SELECT *
-      FROM maal_in
-      ${where}
-      ORDER BY date DESC, created_at DESC;
-    `;
-
-    const result = await pool.query(q, params);
-
-    return res.json({
-      success: true,
-      maal_in: result.rows
-    });
-
-  } catch (err) {
-    console.error("❌ MaalIn List Error:", err);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-
-/* ==========================================================
-   4. GET SINGLE MAAL IN + ITEMS (Owner Detail Page)
-   ========================================================== */
-router.get("/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const header = await pool.query(
-      `SELECT * FROM maal_in WHERE id=$1`,
-      [id]
-    );
-
-    if (header.rowCount === 0) {
-      return res.status(404).json({ success: false, error: "Maal In not found" });
-    }
-
-    const items = await pool.query(
-      `SELECT * FROM maal_in_items WHERE maal_in_id=$1 ORDER BY material`,
-      [id]
-    );
-
-    return res.json({
-      success: true,
-      maal_in: header.rows[0],
-      items: items.rows
-    });
-
-  } catch (err) {
-    console.error("❌ MaalIn Detail Error:", err);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-
-/* ==========================================================
-   5. OWNER APPROVE / REJECT
-   ========================================================== */
-router.post("/:id/approve", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { action, approved_by } = req.body;
-
-    if (!["approve", "reject"].includes(action)) {
-      return res.status(400).json({ success: false, error: "Invalid action" });
-    }
-
-    const newStatus = action === "approve" ? "approved" : "rejected";
-
-    const q = `
-      UPDATE maal_in
-      SET status=$1, approved_by=$2, 
-          approved_at = CASE WHEN $1='approved' THEN NOW() ELSE NULL END
-      WHERE id=$3
-      RETURNING *;
-    `;
-
-    const result = await pool.query(q, [newStatus, approved_by, id]);
-
-    return res.json({
-      success: true,
-      maal_in: result.rows[0]
-    });
-
-  } catch (err) {
-    console.error("❌ Approve Error:", err);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-
-export default router;
