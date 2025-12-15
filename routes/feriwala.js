@@ -98,21 +98,65 @@ router.post("/add", async (req, res) => {
       [totalAmount, feriwala_id]
     );
 
-    /* ACCOUNT LEDGER ENTRY */
-    await client.query(
-      `
-      INSERT INTO account_transactions
-      (id, company_id, godown_id, account_id, type, amount, category, reference, metadata, created_at)
-      VALUES (uuid_generate_v4(), $1, $2, $3, 'debit', $4, 'feriwala purchase', $5, '{}', NOW())
-    `,
-      [company_id, godown_id, account_id, totalAmount, `Purchase from ${vendor_name}`]
-    );
+    /* =====================================================
+   🔻 AUTO DEBIT ROKADI FOR FERIWALA PURCHASE
+===================================================== */
 
-    /* UPDATE ACCOUNT BALANCE */
-    await client.query(
-      `UPDATE accounts SET balance = balance - $1 WHERE id = $2`,
-      [totalAmount, account_id]
-    );
+// decide source (cash / bank)
+const rokadiAccountType =
+  req.body.payment_mode &&
+  req.body.payment_mode.toLowerCase() === "cash"
+    ? "cash"
+    : "bank";
+
+// get rokadi account
+const rokadiAccRes = await client.query(
+  `
+  SELECT id, balance
+  FROM rokadi_accounts
+  WHERE company_id = $1
+    AND godown_id = $2
+    AND account_type = $3
+  LIMIT 1
+  `,
+  [company_id, godown_id, rokadiAccountType]
+);
+
+if (rokadiAccRes.rowCount === 0) {
+  throw new Error(`Rokadi ${rokadiAccountType} account not found`);
+}
+
+const rokadiAccountId = rokadiAccRes.rows[0].id;
+
+// insert rokadi transaction (DEBIT)
+await client.query(
+  `
+  INSERT INTO rokadi_transactions
+  (id, company_id, godown_id, account_id,
+   type, amount, category, reference, created_at)
+  VALUES
+  (uuid_generate_v4(), $1, $2, $3,
+   'debit', $4, 'feriwala', $5, NOW())
+  `,
+  [
+    company_id,
+    godown_id,
+    rokadiAccountId,
+    totalAmount,
+    `Feriwala purchase: ${vendor_name}`,
+  ]
+);
+
+// update rokadi balance
+await client.query(
+  `
+  UPDATE rokadi_accounts
+  SET balance = balance - $1
+  WHERE id = $2
+  `,
+  [totalAmount, rokadiAccountId]
+);
+
 
     await client.query("COMMIT");
 
@@ -327,7 +371,7 @@ router.get("/ledger", async (req, res) => {
 
     /* =========================
        FETCH PURCHASES (CREDIT)
-       with material + weight
+       material + weight + rate
     ========================= */
     const purchases = await pool.query(
       `
@@ -335,8 +379,8 @@ router.get("/ledger", async (req, res) => {
         fr.date,
         'purchase' AS type,
         string_agg(
-          fs.material || ' (' || fs.weight || 'kg)',
-          ', '
+          fs.material || ' (' || fs.weight || 'kg × ₹' || fs.rate || ')',
+          E'\n'
         ) AS description,
         fr.total_amount AS amount
       FROM feriwala_records fr
@@ -376,8 +420,6 @@ router.get("/ledger", async (req, res) => {
 
     /* =========================
        RUNNING BALANCE
-       purchase = credit (+)
-       payment  = debit  (-)
     ========================= */
     let runningBalance = 0;
 

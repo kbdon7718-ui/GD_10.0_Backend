@@ -1,43 +1,44 @@
-// backend/routes/expenses.js
 import express from "express";
 import { pool } from "../config/db.js";
 
 const router = express.Router();
 
-/* ===================================================
-   MANAGER — ADD EXPENSE (UNIFIED FLOW)
-=================================================== */
+/* =========================================================
+   MANAGER — SINGLE ENTRY POINT FOR ALL PAYMENTS
+========================================================= */
 router.post("/", async (req, res) => {
   const client = await pool.connect();
+
   try {
     const {
       company_id,
       godown_id,
-      category,
+      date,
+      category,                // Normal | Labour | Feriwala | Kabadiwala
       description,
       amount,
-      payment_mode,
-      paid_to,        // ✅ { id, name, type }
-      labour_id,      // only for labour
-      date,
+      payment_mode,            // Cash | UPI | Bank
+      paid_to,
+
+      // labour
+      labour_id,
+
+      // vendor
+      vendor_id,
+      vendor_type,             // feriwala | kabadiwala
+
       created_by,
     } = req.body;
 
-    if (
-      !company_id ||
-      !godown_id ||
-      !amount ||
-      !paid_to ||
-      !paid_to.type
-    ) {
+    if (!company_id || !godown_id || !amount || !category) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
     await client.query("BEGIN");
 
-    /* ===================================================
-       1️⃣ SAVE EXPENSE (MASTER LEDGER)
-    =================================================== */
+    /* =====================================================
+       1️⃣ SAVE EXPENSE (SOURCE OF TRUTH)
+    ===================================================== */
     const expenseRes = await client.query(
       `
       INSERT INTO expenses
@@ -51,6 +52,9 @@ router.post("/", async (req, res) => {
         amount,
         payment_mode,
         paid_to,
+        vendor_id,
+        vendor_type,
+        labour_id,
         created_by,
         created_at
       )
@@ -60,7 +64,8 @@ router.post("/", async (req, res) => {
         $1,$2,$3,
         $4,$5,$6,
         $7,$8,
-        $9,
+        $9,$10,
+        $11,$12,
         NOW()
       )
       RETURNING id;
@@ -69,179 +74,172 @@ router.post("/", async (req, res) => {
         company_id,
         godown_id,
         date || new Date(),
-        category || "General",
+        category,
         description || "",
-        Number(amount),
+        amount,
         payment_mode || "Cash",
-        JSON.stringify(paid_to),   // ✅ JSONB
+        paid_to || "",
+        vendor_id || null,
+        vendor_type || null,
+        labour_id || null,
         created_by || "manager",
       ]
     );
 
-    const expenseId = expenseRes.rows[0].id;
+    const expense_id = expenseRes.rows[0].id;
 
-    /* ===================================================
-       2️⃣ VENDOR / LABOUR SIDE ENTRIES
-    =================================================== */
-
-    // 🟡 LABOUR
-    if (paid_to.type === "labour" && labour_id) {
+    /* =====================================================
+       2️⃣ LABOUR PAYMENT
+    ===================================================== */
+    if (category === "Labour" && labour_id) {
       await client.query(
         `
         INSERT INTO labour_withdrawals
         (
-          id,
-          company_id,
-          godown_id,
-          labour_id,
-          date,
-          amount,
-          mode,
-          type,
-          created_at
+          id, company_id, godown_id, labour_id,
+          date, amount, mode, type, created_at
         )
         VALUES
         (
           uuid_generate_v4(),
           $1,$2,$3,
-          $4,$5,
-          $6,
-          'salary',
-          NOW()
-        );
+          $4,$5,$6,'salary',NOW()
+        )
         `,
         [
           company_id,
           godown_id,
           labour_id,
           date || new Date(),
-          Number(amount),
+          amount,
           payment_mode || "cash",
         ]
       );
     }
 
-    // 🟡 FERIWALA
-    if (paid_to.type === "feriwala") {
+    /* =====================================================
+       3️⃣ FERIWALA / KABADIWALA PAYMENT
+    ===================================================== */
+    if (category === "Feriwala" && vendor_id) {
       await client.query(
         `
-        INSERT INTO feriwala_payments
+        INSERT INTO feriwala_withdrawals
         (
-          id,
+          id, company_id, godown_id, vendor_id,
+          amount, date, note, created_at
+        )
+        VALUES
+        (
+          uuid_generate_v4(),
+          $1,$2,$3,
+          $4,$5,$6,NOW()
+        )
+        `,
+        [
           company_id,
           godown_id,
           vendor_id,
           amount,
-          mode,
-          note,
-          date,
-          created_at
-        )
-        VALUES
+          date || new Date(),
+          description || "",
+        ]
+      );
+    }
+
+    if (category === "Kabadiwala" && vendor_id) {
+      // create placeholder kabadiwala record
+      const kabRes = await client.query(
+        `
+        INSERT INTO kabadiwala_records
         (
+          id, company_id, godown_id, vendor_id,
+          kabadiwala_name, date,
+          total_amount, payment_mode, payment_status, created_at
+        )
+        SELECT
           uuid_generate_v4(),
-          $1,$2,$3,
-          $4,$5,$6,$7,
-          NOW()
-        );
+          $1,$2,v.id,
+          v.name,$3,
+          0,$4,'paid',NOW()
+        FROM vendors v
+        WHERE v.id=$5
+        RETURNING id;
         `,
         [
           company_id,
           godown_id,
-          paid_to.id,
-          Number(amount),
-          payment_mode || "cash",
-          description || "Expense payment",
           date || new Date(),
+          payment_mode || "cash",
+          vendor_id,
         ]
       );
-    }
 
-    // 🟡 KABADIWALA
-    if (paid_to.type === "kabadiwala") {
       await client.query(
         `
         INSERT INTO kabadiwala_payments
         (
-          id,
-          kabadiwala_id,
-          amount,
-          mode,
-          note,
-          date,
-          created_at
+          id, kabadiwala_id, amount, mode, note, date, created_at
         )
         VALUES
         (
           uuid_generate_v4(),
-          $1,$2,$3,$4,$5,
-          NOW()
-        );
+          $1,$2,$3,$4,$5,NOW()
+        )
         `,
         [
-          paid_to.id,
-          Number(amount),
+          kabRes.rows[0].id,
+          amount,
           payment_mode || "cash",
-          description || "Expense payment",
+          description || "",
           date || new Date(),
         ]
       );
     }
 
-    /* ===================================================
-       3️⃣ ROKADI DEBIT (SINGLE SOURCE OF TRUTH)
-    =================================================== */
+    /* =====================================================
+       4️⃣ ROKADI DEBIT (ONCE — HERE ONLY)
+    ===================================================== */
     const rokadiType =
       payment_mode && payment_mode.toLowerCase() === "cash"
         ? "cash"
         : "bank";
 
-    const rAcc = await client.query(
+    const rokadiRes = await client.query(
       `
-      SELECT id FROM rokadi_accounts
+      SELECT id
+      FROM rokadi_accounts
       WHERE company_id=$1 AND godown_id=$2 AND account_type=$3
-      LIMIT 1;
+      LIMIT 1
       `,
       [company_id, godown_id, rokadiType]
     );
 
-    if (rAcc.rowCount === 0) {
+    if (rokadiRes.rowCount === 0) {
       throw new Error(`Rokadi ${rokadiType} account not found`);
     }
 
-    const rokadiAccountId = rAcc.rows[0].id;
+    const rokadi_id = rokadiRes.rows[0].id;
 
     await client.query(
       `
       INSERT INTO rokadi_transactions
       (
-        id,
-        company_id,
-        godown_id,
-        account_id,
-        type,
-        amount,
-        category,
-        reference,
-        created_at
+        id, company_id, godown_id, account_id,
+        type, amount, category, reference, created_at
       )
       VALUES
       (
         uuid_generate_v4(),
         $1,$2,$3,
-        'debit',
-        $4,
-        'expense',
-        $5,
-        NOW()
-      );
+        'debit',$4,'expense',$5,NOW()
+      )
       `,
       [
         company_id,
         godown_id,
-        rokadiAccountId,
-        Number(amount),
-        `${paid_to.type}: ${paid_to.name}`,
+        rokadi_id,
+        amount,
+        `${category}: ${paid_to || description}`,
       ]
     );
 
@@ -249,30 +247,30 @@ router.post("/", async (req, res) => {
       `
       UPDATE rokadi_accounts
       SET balance = balance - $1
-      WHERE id = $2;
+      WHERE id=$2
       `,
-      [Number(amount), rokadiAccountId]
+      [amount, rokadi_id]
     );
 
     await client.query("COMMIT");
 
     res.status(201).json({
       success: true,
-      expense_id: expenseId,
+      expense_id,
       message: "Expense recorded successfully",
     });
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("❌ EXPENSE ERROR:", err.message);
+    console.error("❌ EXPENSE ERROR:", err);
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
   }
 });
 
-/* ===================================================
+/* =====================================================
    OWNER — LIST EXPENSES
-=================================================== */
+===================================================== */
 router.get("/list", async (req, res) => {
   const { company_id, godown_id, date } = req.query;
 
@@ -280,10 +278,9 @@ router.get("/list", async (req, res) => {
     `
     SELECT *
     FROM expenses
-    WHERE company_id=$1
-      AND godown_id=$2
-      AND ($3::date IS NULL OR date::date = $3::date)
-    ORDER BY created_at DESC;
+    WHERE company_id=$1 AND godown_id=$2
+      AND ($3::date IS NULL OR date::date=$3::date)
+    ORDER BY created_at DESC
     `,
     [company_id, godown_id, date || null]
   );
@@ -291,21 +288,22 @@ router.get("/list", async (req, res) => {
   res.json({ success: true, expenses: result.rows });
 });
 
-/* ===================================================
-   OWNER — EXPENSE SUMMARY
-=================================================== */
+/* =====================================================
+   OWNER — SUMMARY
+===================================================== */
 router.get("/summary", async (req, res) => {
   const { company_id, godown_id, start_date, end_date } = req.query;
 
   const result = await pool.query(
     `
     SELECT
-      COUNT(*) AS total_expenses,
-      COALESCE(SUM(amount),0) AS total_amount
+      COUNT(*) AS total_entries,
+      COALESCE(SUM(amount),0) AS total_amount,
+      COALESCE(SUM(CASE WHEN LOWER(payment_mode)='cash' THEN amount END),0) AS cash,
+      COALESCE(SUM(CASE WHEN LOWER(payment_mode) IN ('bank','bank transfer','upi') THEN amount END),0) AS bank
     FROM expenses
-    WHERE company_id=$1
-      AND godown_id=$2
-      AND date BETWEEN $3::date AND $4::date;
+    WHERE company_id=$1 AND godown_id=$2
+      AND date BETWEEN $3::date AND $4::date
     `,
     [
       company_id,
@@ -316,24 +314,6 @@ router.get("/summary", async (req, res) => {
   );
 
   res.json({ success: true, summary: result.rows[0] });
-});
-
-/* ===================================================
-   OWNER — DELETE EXPENSE (NO ROLLBACK YET)
-=================================================== */
-router.delete("/delete/:id", async (req, res) => {
-  const { id } = req.params;
-
-  const result = await pool.query(
-    `DELETE FROM expenses WHERE id=$1 RETURNING *;`,
-    [id]
-  );
-
-  if (result.rowCount === 0) {
-    return res.status(404).json({ error: "Expense not found" });
-  }
-
-  res.json({ success: true });
 });
 
 export default router;
