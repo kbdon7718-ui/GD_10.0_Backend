@@ -14,17 +14,11 @@ router.post("/", async (req, res) => {
       company_id,
       godown_id,
       date,
-      category,        // Misc | Labour | Feriwala | Kabadiwala
+      category,
       description,
       amount,
-      payment_mode,    // Cash | UPI | Bank Transfer
+      payment_mode,
       paid_to,
-
-      labour_id,
-      vendor_id,
-      vendor_type,     // feriwala | kabadiwala
-
-      created_by,
     } = req.body;
 
     if (!company_id || !godown_id || !amount || !category) {
@@ -41,181 +35,12 @@ router.post("/", async (req, res) => {
        NORMALIZE PAYMENT MODE
     =============================== */
     const pm = (payment_mode || "cash").toLowerCase(); // cash | upi | bank transfer
-
-    /* =====================================================
-       1️⃣ SAVE EXPENSE (SOURCE OF TRUTH)
-    ===================================================== */
-    const expenseRes = await client.query(
-      `
-      INSERT INTO expenses
-      (
-        id,
-        company_id,
-        godown_id,
-        date,
-        category,
-        description,
-        amount,
-        payment_mode,
-        paid_to,
-        vendor_id,
-        vendor_type,
-        labour_id,
-        created_by,
-        created_at
-      )
-      VALUES
-      (
-        uuid_generate_v4(),
-        $1,$2,$3,
-        $4,$5,$6,
-        $7,$8,
-        $9,$10,
-        $11,$12,
-        NOW()
-      )
-      RETURNING id;
-      `,
-      [
-        company_id,
-        godown_id,
-        date || new Date(),
-        category,
-        description || "",
-        amount,
-        pm,
-        paid_to || "",
-        vendor_id || null,
-        vendor_type || null,
-        labour_id || null,
-        created_by || "manager",
-      ]
-    );
-
-    const expense_id = expenseRes.rows[0].id;
-
-    /* =====================================================
-       2️⃣ LABOUR PAYMENT
-    ===================================================== */
-    if (category === "Labour" && labour_id) {
-      await client.query(
-        `
-        INSERT INTO labour_withdrawals
-        (
-          id, company_id, godown_id, labour_id,
-          date, amount, mode, type, created_at
-        )
-        VALUES
-        (
-          uuid_generate_v4(),
-          $1,$2,$3,
-          $4,$5,$6,'salary',NOW()
-        )
-        `,
-        [
-          company_id,
-          godown_id,
-          labour_id,
-          date || new Date(),
-          amount,
-          pm,
-        ]
-      );
-    }
-
-    /* =====================================================
-       3️⃣ FERIWALA PAYMENT
-    ===================================================== */
-    if (category === "Feriwala" && vendor_id) {
-      await client.query(
-        `
-        INSERT INTO feriwala_withdrawals
-        (
-          id, company_id, godown_id, vendor_id,
-          amount, date, note, created_at
-        )
-        VALUES
-        (
-          uuid_generate_v4(),
-          $1,$2,$3,
-          $4,$5,$6,NOW()
-        )
-        `,
-        [
-          company_id,
-          godown_id,
-          vendor_id,
-          amount,
-          date || new Date(),
-          description || "",
-        ]
-      );
-    }
-
-    /* =====================================================
-       4️⃣ KABADIWALA PAYMENT
-    ===================================================== */
-    if (category === "Kabadiwala" && vendor_id) {
-      const kabRes = await client.query(
-        `
-        INSERT INTO kabadiwala_records
-        (
-          id, company_id, godown_id, vendor_id,
-          kabadiwala_name, date,
-          total_amount, payment_mode, payment_status, created_at
-        )
-        SELECT
-          uuid_generate_v4(),
-          $1,$2,v.id,
-          v.name,$3,
-          0,$4,'paid',NOW()
-        FROM vendors v
-        WHERE v.id=$5
-        RETURNING id;
-        `,
-        [
-          company_id,
-          godown_id,
-          date || new Date(),
-          pm,
-          vendor_id,
-        ]
-      );
-
-      if (kabRes.rowCount === 0) {
-        throw new Error("Kabadiwala vendor not found");
-      }
-
-      await client.query(
-        `
-        INSERT INTO kabadiwala_payments
-        (
-          id, kabadiwala_id, amount, mode, note, date, created_at
-        )
-        VALUES
-        (
-          uuid_generate_v4(),
-          $1,$2,$3,$4,$5,NOW()
-        )
-        `,
-        [
-          kabRes.rows[0].id,
-          amount,
-          pm,
-          description || "",
-          date || new Date(),
-        ]
-      );
-    }
-
-    /* =====================================================
-       5️⃣ ROKADI DEBIT (ONLY ONCE)
-       Cash → cash
-       UPI / Bank Transfer → bank
-    ===================================================== */
     const rokadiType = pm === "cash" ? "cash" : "bank";
 
-    const rokadiRes = await client.query(
+    /* =====================================================
+       1️⃣ FIND ROKADI ACCOUNT
+    ===================================================== */
+    const accRes = await client.query(
       `
       SELECT id
       FROM rokadi_accounts
@@ -227,42 +52,75 @@ router.post("/", async (req, res) => {
       [company_id, godown_id, rokadiType]
     );
 
-    if (rokadiRes.rowCount === 0) {
+    if (accRes.rowCount === 0) {
       throw new Error(`Rokadi ${rokadiType} account not found`);
     }
 
-    const rokadi_id = rokadiRes.rows[0].id;
+    const account_id = accRes.rows[0].id;
 
-    await client.query(
+    /* =====================================================
+       2️⃣ SAVE EXPENSE (SOURCE OF TRUTH)
+    ===================================================== */
+    const expenseRes = await client.query(
       `
-      INSERT INTO rokadi_transactions
+      INSERT INTO expenses
       (
-        id, company_id, godown_id, account_id,
-        type, amount, category, reference, created_at
+        company_id,
+        godown_id,
+        date,
+        category,
+        description,
+        amount,
+        payment_mode,
+        paid_to,
+        account_id,
+        created_at
       )
       VALUES
-      (
-        uuid_generate_v4(),
-        $1,$2,$3,
-        'debit',$4,'expense',$5,NOW()
-      )
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+      RETURNING id;
       `,
       [
         company_id,
         godown_id,
-        rokadi_id,
+        date || new Date(),
+        category,
+        description || "",
         amount,
-        `${category}: ${paid_to || description}`,
+        pm,
+        paid_to || "",
+        account_id,
       ]
     );
 
+    const expense_id = expenseRes.rows[0].id;
+
+    /* =====================================================
+       3️⃣ ROKADI TRANSACTION (BALANCE AUTO VIA TRIGGER)
+    ===================================================== */
     await client.query(
       `
-      UPDATE rokadi_accounts
-      SET balance = balance - $1
-      WHERE id=$2
+      INSERT INTO rokadi_transactions
+      (
+        account_id,
+        company_id,
+        godown_id,
+        type,
+        amount,
+        category,
+        reference,
+        created_at
+      )
+      VALUES
+      ($1,$2,$3,'debit',$4,'expense',$5,NOW())
       `,
-      [amount, rokadi_id]
+      [
+        account_id,
+        company_id,
+        godown_id,
+        amount,
+        `${category}: ${paid_to || description}`,
+      ]
     );
 
     await client.query("COMMIT");
@@ -282,7 +140,7 @@ router.post("/", async (req, res) => {
 });
 
 /* =====================================================
-   OWNER — LIST EXPENSES
+   LIST
 ===================================================== */
 router.get("/list", async (req, res) => {
   const { company_id, godown_id, date } = req.query;
@@ -303,7 +161,7 @@ router.get("/list", async (req, res) => {
 });
 
 /* =====================================================
-   OWNER — SUMMARY
+   SUMMARY
 ===================================================== */
 router.get("/summary", async (req, res) => {
   const { company_id, godown_id, start_date, end_date } = req.query;
@@ -313,12 +171,8 @@ router.get("/summary", async (req, res) => {
     SELECT
       COUNT(*) AS total_entries,
       COALESCE(SUM(amount),0) AS total_amount,
-      COALESCE(
-        SUM(CASE WHEN payment_mode='cash' THEN amount ELSE 0 END),0
-      ) AS cash,
-      COALESCE(
-        SUM(CASE WHEN payment_mode IN ('upi','bank','bank transfer') THEN amount ELSE 0 END),0
-      ) AS bank
+      COALESCE(SUM(CASE WHEN payment_mode='cash' THEN amount ELSE 0 END),0) AS cash,
+      COALESCE(SUM(CASE WHEN payment_mode!='cash' THEN amount ELSE 0 END),0) AS bank
     FROM expenses
     WHERE company_id=$1
       AND godown_id=$2
