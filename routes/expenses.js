@@ -77,7 +77,7 @@ router.post("/", async (req, res) => {
         created_at
       )
       VALUES
-      ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+      ($1,$2,$3,$4,$5,$6,$7,$8,NULL,NOW())
       RETURNING id;
       `,
       [
@@ -89,7 +89,7 @@ router.post("/", async (req, res) => {
         amount,
         pm,
         paid_to || "",
-        account_id,
+       // account_id,
       ]
     );
 
