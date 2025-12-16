@@ -388,5 +388,48 @@ router.get("/history/bank", async (req, res) => {
   }
 });
 
+/* =========================================================
+   GET ROKADI CASH HISTORY (READ ONLY)
+   ✅ NEW — for Cash History dialog
+========================================================= */
+router.get("/history/cash", async (req, res) => {        // ✅ NEW
+  try {                                                   // ✅ NEW
+    const { company_id, godown_id } = req.query;          // ✅ NEW
+
+    if (!company_id || !godown_id) {                      // ✅ NEW
+      return res.status(400).json({                       // ✅ NEW
+        error: "company_id & godown_id required",         // ✅ NEW
+      });                                                  // ✅ NEW
+    }
+
+    const result = await pool.query(                      // ✅ NEW
+      `
+      SELECT
+        rt.id,
+        rt.type,               -- credit | debit
+        rt.amount,
+        rt.category,
+        rt.reference,
+        rt.created_at AS date,
+        ra.account_name
+      FROM rokadi_transactions rt
+      JOIN rokadi_accounts ra ON ra.id = rt.account_id
+      WHERE rt.company_id = $1
+        AND rt.godown_id = $2
+        AND ra.account_type = 'cash'     -- ✅ CASH FILTER
+      ORDER BY rt.created_at ASC
+      `,
+      [company_id, godown_id]
+    );
+
+    res.json({                                           // ✅ NEW
+      success: true,                                     // ✅ NEW
+      transactions: result.rows,                         // ✅ NEW
+    });
+  } catch (err) {                                        // ✅ NEW
+    console.error("❌ ROKADI CASH HISTORY:", err.message);// ✅ NEW
+    res.status(500).json({ error: err.message });        // ✅ NEW
+  }
+});
 
 export default router;

@@ -112,74 +112,84 @@ router.post("/:id/items", async (req, res) => {
     /* =======================
        FERIWALA PURCHASE
     ======================= */
-    if (header.source === "feriwala") {
-      const vRes = await client.query(
-        `SELECT id FROM vendors WHERE name=$1 LIMIT 1`,
-        [header.supplier_name]
-      );
+    /* ======================================================
+   🔗 AUTO HISAB UPDATE (CORRECT WAY)
+====================================================== */
+if (header.source === "feriwala") {
+  const vRes = await client.query(
+    `SELECT id FROM vendors WHERE name=$1 LIMIT 1`,
+    [header.supplier_name]
+  );
 
-      if (vRes.rowCount === 0) {
-        throw new Error("Feriwala vendor not found");
-      }
+  if (vRes.rowCount === 0) {
+    throw new Error("Feriwala vendor not found");
+  }
 
-      const vendor_id = vRes.rows[0].id;
+  const vendor_id = vRes.rows[0].id;
 
-      await client.query(
-        `
-        INSERT INTO feriwala_records
-        (id, company_id, godown_id, vendor_id, date, total_amount, created_at)
-        VALUES (uuid_generate_v4(), $1,$2,$3,$4,$5,NOW())
-        `,
-        [
-          header.company_id,
-          header.godown_id,
-          vendor_id,
-          header.date,
-          totalAmount,
-        ]
-      );
-    }
+  // 🔁 CALL SAME LOGIC AS feriwala purchase
+  await client.query(
+    `
+    INSERT INTO feriwala_withdrawals
+    (
+      id, company_id, godown_id, vendor_id,
+      amount, date, note, created_at
+    )
+    VALUES
+    (
+      uuid_generate_v4(),
+      $1,$2,$3,
+      $4,$5,$6,NOW()
+    )
+    `,
+    [
+      header.company_id,
+      header.godown_id,
+      vendor_id,
+      totalAmount,
+      header.date,
+      `Maal In purchase (${id})`,
+    ]
+  );
+}
 
-    /* =======================
-       KABADIWALA PURCHASE
-    ======================= */
-    if (header.source === "kabadiwala") {
-      const vRes = await client.query(
-        `SELECT id, name FROM vendors WHERE name=$1 LIMIT 1`,
-        [header.supplier_name]
-      );
+/* =======================
+   KABADIWALA PURCHASE
+======================= */
+if (header.source === "kabadiwala") {
+  const vRes = await client.query(
+    `SELECT id, name FROM vendors WHERE name=$1 LIMIT 1`,
+    [header.supplier_name]
+  );
 
-      if (vRes.rowCount === 0) {
-        throw new Error("Kabadiwala vendor not found");
-      }
+  if (vRes.rowCount === 0) {
+    throw new Error("Kabadiwala vendor not found");
+  }
 
-      const vendor_id = vRes.rows[0].id;
-      const kabadiwala_name = vRes.rows[0].name;
+  const vendor_id = vRes.rows[0].id;
 
-      await client.query(
-        `
-        INSERT INTO kabadiwala_records
-        (
-          id, company_id, godown_id, vendor_id,
-          kabadiwala_name, date,
-          total_amount, payment_mode, payment_status, created_at
-        )
-        VALUES
-        (
-          uuid_generate_v4(), $1,$2,$3,$4,$5,
-          $6,'cash','pending',NOW()
-        )
-        `,
-        [
-          header.company_id,
-          header.godown_id,
-          vendor_id,
-          kabadiwala_name,
-          header.date,
-          totalAmount,
-        ]
-      );
-    }
+  // 🔁 SAME PAYMENT LOGIC AS kabadiwala.js
+  await client.query(
+    `
+    INSERT INTO kabadiwala_payments
+    (
+      id, vendor_id, amount, mode, note, date, created_at
+    )
+    VALUES
+    (
+      uuid_generate_v4(),
+      $1,$2,'cash',$3,$4,NOW()
+    )
+    `,
+    [
+      vendor_id,
+      totalAmount,
+      `Maal In purchase (${id})`,
+      header.date,
+    ]
+  );
+}
+
 
     await client.query("COMMIT");
 

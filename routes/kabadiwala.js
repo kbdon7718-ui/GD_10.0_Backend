@@ -269,5 +269,74 @@ router.post("/withdrawal", async (req, res) => {
     client.release();
   }
 });
+/* ============================================================
+   OWNER — KABADIWALA BALANCES
+============================================================ */
+router.get("/balances", async (req, res) => {
+  try {
+    const { company_id, godown_id, date } = req.query;
+
+    const result = await pool.query(
+      `
+      SELECT
+        v.id AS vendor_id,
+        v.name AS vendor_name,
+        COALESCE(d.current_balance, 0) AS balance
+      FROM vendors v
+      LEFT JOIN kabadiwala_daily_balance d
+        ON d.vendor_id = v.id
+       AND d.company_id = $1
+       AND d.godown_id = $2
+       AND d.date = $3::date
+      WHERE v.company_id = $1
+      ORDER BY v.name
+      `,
+      [
+        company_id,
+        godown_id,
+        date || new Date().toISOString().split("T")[0],
+      ]
+    );
+
+    res.json({ success: true, balances: result.rows });
+  } catch (err) {
+    console.error("❌ KABADIWALA BALANCES:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+/* ============================================================
+   OWNER — KABADIWALA LEDGER (FULL HISTORY)
+============================================================ */
+router.get("/owner-list", async (req, res) => {
+  try {
+    const { company_id, godown_id } = req.query;
+
+    const result = await pool.query(
+      `
+      SELECT
+        kr.date,
+        kr.kabadiwala_name AS kabadi_name,
+        ks.material,
+        ks.weight,
+        ks.rate,
+        ks.amount
+      FROM kabadiwala_records kr
+      JOIN kabadiwala_scraps ks
+        ON ks.kabadiwala_id = kr.id
+      WHERE kr.company_id = $1
+        AND kr.godown_id = $2
+      ORDER BY kr.date ASC, kr.created_at ASC
+      `,
+      [company_id, godown_id]
+    );
+
+    res.json({ success: true, entries: result.rows });
+  } catch (err) {
+    console.error("❌ KABADIWALA OWNER LIST:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 
 export default router;
