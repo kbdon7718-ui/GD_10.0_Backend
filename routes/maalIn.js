@@ -6,7 +6,7 @@ const router = express.Router();
 
 /* ==========================================================
    1. CREATE MAAL IN HEADER (Manager – Step 1)
-   ========================================================== */
+========================================================== */
 router.post("/", async (req, res) => {
   try {
     const {
@@ -57,7 +57,8 @@ router.post("/", async (req, res) => {
 
 /* ==========================================================
    2. ADD MULTIPLE SCRAP ITEMS (Manager – Step 2)
-   ========================================================== */
+   + AUTO HISAB UPDATE (FERIWALA / KABADIWALA)
+========================================================== */
 router.post("/:id/items", async (req, res) => {
   const client = await pool.connect();
   try {
@@ -72,6 +73,7 @@ router.post("/:id/items", async (req, res) => {
 
     await client.query("BEGIN");
 
+    /* ---------- INSERT ITEMS ---------- */
     for (const it of items) {
       await client.query(
         `
@@ -83,22 +85,107 @@ router.post("/:id/items", async (req, res) => {
       );
     }
 
+    /* ---------- CALCULATE TOTAL ---------- */
     const totalRes = await client.query(
       `SELECT COALESCE(SUM(amount),0) AS total
        FROM maal_in_items WHERE maal_in_id=$1`,
       [id]
     );
 
+    const totalAmount = Number(totalRes.rows[0].total);
+
     await client.query(
       `UPDATE maal_in SET total_amount=$1 WHERE id=$2`,
-      [totalRes.rows[0].total, id]
+      [totalAmount, id]
     );
+
+    /* ======================================================
+       🔗 AUTO HISAB UPDATE BASED ON SOURCE
+    ====================================================== */
+    const headerRes = await client.query(
+      `SELECT * FROM maal_in WHERE id=$1`,
+      [id]
+    );
+
+    const header = headerRes.rows[0];
+
+    /* =======================
+       FERIWALA PURCHASE
+    ======================= */
+    if (header.source === "feriwala") {
+      const vRes = await client.query(
+        `SELECT id FROM vendors WHERE name=$1 LIMIT 1`,
+        [header.supplier_name]
+      );
+
+      if (vRes.rowCount === 0) {
+        throw new Error("Feriwala vendor not found");
+      }
+
+      const vendor_id = vRes.rows[0].id;
+
+      await client.query(
+        `
+        INSERT INTO feriwala_records
+        (id, company_id, godown_id, vendor_id, date, total_amount, created_at)
+        VALUES (uuid_generate_v4(), $1,$2,$3,$4,$5,NOW())
+        `,
+        [
+          header.company_id,
+          header.godown_id,
+          vendor_id,
+          header.date,
+          totalAmount,
+        ]
+      );
+    }
+
+    /* =======================
+       KABADIWALA PURCHASE
+    ======================= */
+    if (header.source === "kabadiwala") {
+      const vRes = await client.query(
+        `SELECT id, name FROM vendors WHERE name=$1 LIMIT 1`,
+        [header.supplier_name]
+      );
+
+      if (vRes.rowCount === 0) {
+        throw new Error("Kabadiwala vendor not found");
+      }
+
+      const vendor_id = vRes.rows[0].id;
+      const kabadiwala_name = vRes.rows[0].name;
+
+      await client.query(
+        `
+        INSERT INTO kabadiwala_records
+        (
+          id, company_id, godown_id, vendor_id,
+          kabadiwala_name, date,
+          total_amount, payment_mode, payment_status, created_at
+        )
+        VALUES
+        (
+          uuid_generate_v4(), $1,$2,$3,$4,$5,
+          $6,'cash','pending',NOW()
+        )
+        `,
+        [
+          header.company_id,
+          header.godown_id,
+          vendor_id,
+          kabadiwala_name,
+          header.date,
+          totalAmount,
+        ]
+      );
+    }
 
     await client.query("COMMIT");
 
     return res.json({
       success: true,
-      message: "Items added and total updated",
+      message: "Items added, total updated & hisab adjusted",
     });
   } catch (err) {
     await client.query("ROLLBACK");
@@ -111,7 +198,7 @@ router.post("/:id/items", async (req, res) => {
 
 /* ==========================================================
    3. LIST MAAL IN (Owner / Dashboard)
-   ========================================================== */
+========================================================== */
 router.get("/list", async (req, res) => {
   try {
     const { company_id, godown_id, date } = req.query;
@@ -152,7 +239,7 @@ router.get("/list", async (req, res) => {
 
 /* ==========================================================
    4. GET SINGLE MAAL IN + ITEMS
-   ========================================================== */
+========================================================== */
 router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -188,7 +275,7 @@ router.get("/:id", async (req, res) => {
 
 /* ==========================================================
    5. OWNER APPROVE / REJECT
-   ========================================================== */
+========================================================== */
 router.post("/:id/approve", async (req, res) => {
   try {
     const { id } = req.params;
