@@ -278,18 +278,17 @@ router.get("/balances", async (req, res) => {
 
     const result = await pool.query(
       `
-      SELECT
-        v.id AS vendor_id,
-        v.name AS vendor_name,
-        COALESCE(d.current_balance, 0) AS balance
-      FROM vendors v
-      LEFT JOIN kabadiwala_daily_balance d
-        ON d.vendor_id = v.id
-       AND d.company_id = $1
-       AND d.godown_id = $2
-       AND d.date = $3::date
-      WHERE v.company_id = $1
-      ORDER BY v.name
+     SELECT
+  d.vendor_id,
+  v.name AS vendor_name,
+  d.current_balance AS balance
+FROM kabadiwala_daily_balance d
+JOIN vendors v ON v.id = d.vendor_id
+WHERE d.company_id = $1
+  AND d.godown_id = $2
+  AND d.date = $3::date
+ORDER BY v.name;
+
       `,
       [
         company_id,
@@ -314,19 +313,19 @@ router.get("/owner-list", async (req, res) => {
     const result = await pool.query(
       `
       SELECT
-        kr.date,
-        kr.kabadiwala_name AS kabadi_name,
-        ks.material,
-        ks.weight,
-        ks.rate,
-        ks.amount
-      FROM kabadiwala_records kr
-      JOIN kabadiwala_scraps ks
-        ON ks.kabadiwala_id = kr.id
-      WHERE kr.company_id = $1
-        AND kr.godown_id = $2
-      ORDER BY kr.date ASC, kr.created_at ASC
-      `,
+  kr.date,
+  v.name AS kabadi_name,
+  ks.material,
+  ks.weight,
+  ks.rate,
+  ks.amount
+FROM kabadiwala_records kr
+JOIN kabadiwala_scraps ks ON ks.kabadiwala_id = kr.id
+JOIN vendors v ON v.id = kr.vendor_id
+WHERE kr.company_id = $1
+  AND kr.godown_id = $2
+ORDER BY kr.date ASC;
+   `,
       [company_id, godown_id]
     );
 
