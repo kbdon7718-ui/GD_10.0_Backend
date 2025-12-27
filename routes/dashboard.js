@@ -23,19 +23,21 @@ router.get("/overview", async (req, res) => {
     // SCRAP IN
     const scrapIn = await pool.query(
       `SELECT
-        COALESCE(SUM(weight),0) FILTER (WHERE date::date = CURRENT_DATE) AS today,
-        COALESCE(SUM(weight),0) FILTER (WHERE date >= date_trunc('month', CURRENT_DATE)) AS month,
-        COALESCE(SUM(weight),0) AS all_time
-      FROM maal_in WHERE company_id = $1 AND godown_id = $2`,
+        COALESCE(SUM(NULLIF(mii.weight::text,'')::numeric) FILTER (WHERE mi.date::date = CURRENT_DATE),0) AS today,
+        COALESCE(SUM(NULLIF(mii.weight::text,'')::numeric) FILTER (WHERE mi.date >= date_trunc('month', CURRENT_DATE)),0) AS month,
+        COALESCE(SUM(NULLIF(mii.weight::text,'')::numeric),0) AS all_time
+      FROM maal_in_items mii
+      JOIN maal_in mi ON mi.id = mii.maal_in_id
+      WHERE mi.company_id = $1 AND mi.godown_id = $2`,
       [company_id, godown_id]
     );
 
     // SCRAP OUT
     const scrapOut = await pool.query(
       `SELECT
-        COALESCE(SUM(weight),0) FILTER (WHERE date::date = CURRENT_DATE) AS today,
-        COALESCE(SUM(weight),0) FILTER (WHERE date >= date_trunc('month', CURRENT_DATE)) AS month,
-        COALESCE(SUM(weight),0) AS all_time
+        COALESCE(SUM(NULLIF(weight::text,'')::numeric) FILTER (WHERE date::date = CURRENT_DATE),0) AS today,
+        COALESCE(SUM(NULLIF(weight::text,'')::numeric) FILTER (WHERE date >= date_trunc('month', CURRENT_DATE)),0) AS month,
+        COALESCE(SUM(NULLIF(weight::text,'')::numeric),0) AS all_time
       FROM maal_out WHERE company_id = $1 AND godown_id = $2`,
       [company_id, godown_id]
     );
@@ -43,9 +45,9 @@ router.get("/overview", async (req, res) => {
     // EXPENSES
     const expenses = await pool.query(
       `SELECT
-        COALESCE(SUM(amount),0) FILTER (WHERE date::date = CURRENT_DATE) AS today,
-        COALESCE(SUM(amount),0) FILTER (WHERE date >= date_trunc('month', CURRENT_DATE)) AS month,
-        COALESCE(SUM(amount),0) AS all_time
+        COALESCE(SUM(NULLIF(amount::text,'')::numeric) FILTER (WHERE date::date = CURRENT_DATE),0) AS today,
+        COALESCE(SUM(NULLIF(amount::text,'')::numeric) FILTER (WHERE date >= date_trunc('month', CURRENT_DATE)),0) AS month,
+        COALESCE(SUM(NULLIF(amount::text,'')::numeric),0) AS all_time
       FROM expenses WHERE company_id = $1 AND godown_id = $2`,
       [company_id, godown_id]
     );
@@ -56,7 +58,7 @@ router.get("/overview", async (req, res) => {
         COUNT(*) FILTER (WHERE date::date = CURRENT_DATE) AS today,
         COUNT(*) FILTER (WHERE date >= date_trunc('month', CURRENT_DATE)) AS month,
         COUNT(*) AS all_time
-      FROM truck_records WHERE company_id = $1 AND godown_id = $2`,
+      FROM truck_transactions WHERE company_id = $1 AND godown_id = $2`,
       [company_id, godown_id]
     );
 
@@ -93,23 +95,25 @@ router.get("/overview", async (req, res) => {
     // CASH & BANK (ROKADI)
     const cashResult = await pool.query(
       `SELECT
-        COALESCE(SUM(balance),0) FILTER (WHERE account_type = 'cash') AS cash,
-        COALESCE(SUM(balance),0) FILTER (WHERE account_type = 'bank') AS bank
+        COALESCE(SUM(NULLIF(balance::text,'')::numeric) FILTER (WHERE account_type = 'cash'),0) AS cash,
+        COALESCE(SUM(NULLIF(balance::text,'')::numeric) FILTER (WHERE account_type = 'bank'),0) AS bank
       FROM rokadi_accounts WHERE company_id = $1 AND godown_id = $2`,
       [company_id, godown_id]
     );
 
     // SCRAP BY MATERIAL (Today)
     const scrapByMaterialResult = await pool.query(
-      `SELECT material, COALESCE(SUM(weight),0) AS weight
-      FROM maal_in WHERE company_id = $1 AND godown_id = $2 AND date::date = CURRENT_DATE
-      GROUP BY material ORDER BY material`,
+      `SELECT mii.material, COALESCE(SUM(NULLIF(mii.weight::text,'')::numeric),0) AS weight
+      FROM maal_in_items mii
+      JOIN maal_in mi ON mi.id = mii.maal_in_id
+      WHERE mi.company_id = $1 AND mi.godown_id = $2 AND mi.date::date = CURRENT_DATE
+      GROUP BY mii.material ORDER BY mii.material`,
       [company_id, godown_id]
     );
 
     // EXPENSE ANALYTICS (MONTH)
     const expenseSummaryResult = await pool.query(
-      `SELECT category, COUNT(*) AS payments, COALESCE(SUM(amount),0) AS total
+      `SELECT category, COUNT(*) AS payments, COALESCE(SUM(NULLIF(amount::text,'')::numeric),0) AS total
       FROM expenses WHERE company_id = $1 AND godown_id = $2 AND date >= date_trunc('month', CURRENT_DATE)
       GROUP BY category ORDER BY total DESC`,
       [company_id, godown_id]
