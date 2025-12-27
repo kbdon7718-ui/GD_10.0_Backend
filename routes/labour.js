@@ -441,7 +441,7 @@ router.get("/history/:labour_id", async (req, res) => {
     // Get withdrawal entries
     const withdrawalQuery = await client.query(
       `SELECT id, date, amount, 'Payment' as entry_type, 
-              CASE WHEN payment_mode IS NOT NULL THEN payment_mode ELSE 'Cash' END as mode,
+              CASE WHEN mode IS NOT NULL THEN mode ELSE 'Cash' END as mode,
               created_at
        FROM labour_withdrawals 
        WHERE labour_id = $1 AND company_id = $2 AND godown_id = $3
