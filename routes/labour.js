@@ -452,7 +452,7 @@ router.get("/history/:labour_id", async (req, res) => {
     // Get expense entries related to this labour
     const expenseQuery = await client.query(
       `SELECT id, date, amount, 'Expense' as entry_type, 
-              transaction_mode as mode, description
+              payment_mode as mode, description
        FROM expenses 
        WHERE labour_id = $1 AND company_id = $2 AND godown_id = $3
        ORDER BY date DESC, created_at DESC`,
