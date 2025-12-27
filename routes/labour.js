@@ -404,5 +404,139 @@ router.delete("/:labour_id", async (req, res) => {
   }
 });
 
+/* ===================================================
+   🔵 8. Get Labour History (Ledger)
+=================================================== */
+router.get("/history/:labour_id", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { labour_id } = req.params;
+    const { company_id, godown_id } = req.query;
+
+    if (!labour_id || !company_id || !godown_id) {
+      return res.status(400).json({ error: "Missing required parameters" });
+    }
+
+    // Verify labour belongs to the specified company and godown
+    const labourCheck = await client.query(
+      "SELECT id, name, role, contact, daily_wage, monthly_salary FROM labour WHERE id = $1 AND company_id = $2 AND godown_id = $3",
+      [labour_id, company_id, godown_id]
+    );
+
+    if (labourCheck.rowCount === 0) {
+      return res.status(404).json({ error: "Labour not found" });
+    }
+
+    // Get salary entries
+    const salaryQuery = await client.query(
+      `SELECT id, date, amount, paid, 'Salary' as entry_type, 
+              CASE WHEN paid = true THEN 'Paid' ELSE 'Pending' END as mode,
+              created_at
+       FROM labour_salary 
+       WHERE labour_id = $1 AND company_id = $2 AND godown_id = $3
+       ORDER BY date DESC, created_at DESC`,
+      [labour_id, company_id, godown_id]
+    );
+
+    // Get withdrawal entries
+    const withdrawalQuery = await client.query(
+      `SELECT id, date, amount, 'Payment' as entry_type, 
+              CASE WHEN payment_mode IS NOT NULL THEN payment_mode ELSE 'Cash' END as mode,
+              created_at
+       FROM labour_withdrawals 
+       WHERE labour_id = $1 AND company_id = $2 AND godown_id = $3
+       ORDER BY date DESC, created_at DESC`,
+      [labour_id, company_id, godown_id]
+    );
+
+    // Get expense entries related to this labour
+    const expenseQuery = await client.query(
+      `SELECT id, date, amount, 'Expense' as entry_type, 
+              transaction_mode as mode, description
+       FROM expenses 
+       WHERE labour_id = $1 AND company_id = $2 AND godown_id = $3
+       ORDER BY date DESC, created_at DESC`,
+      [labour_id, company_id, godown_id]
+    );
+
+    // Combine all entries with improved fields
+    const allEntries = [
+      ...salaryQuery.rows.map(entry => ({
+        ...entry,
+        source: 'salary',
+        label: 'Salary Credited',
+        remarks: entry.remarks || '',
+        mode: entry.mode || 'N/A',
+        type: 'credit',
+      })),
+      ...withdrawalQuery.rows.map(entry => ({
+        ...entry,
+        source: 'withdrawal',
+        label: 'Withdrawal',
+        remarks: entry.remarks || '',
+        mode: entry.mode || 'Cash',
+        type: 'debit',
+      })),
+      ...expenseQuery.rows.map(entry => ({
+        ...entry,
+        source: 'expense',
+        label: 'Expense',
+        remarks: entry.description || '',
+        mode: entry.mode || 'N/A',
+        type: 'debit',
+      }))
+    ];
+
+    // Sort by date (oldest first for running balance)
+    allEntries.sort((a, b) => {
+      const dateA = new Date(a.date);
+      const dateB = new Date(b.date);
+      return dateA - dateB;
+    });
+
+    // Calculate totals and running balance
+    let totalEarned = 0;
+    let totalPaid = 0;
+    let runningBalance = 0;
+    const entriesWithBalance = allEntries.map(entry => {
+      const amount = parseFloat(entry.amount) || 0;
+      if (entry.type === 'credit') {
+        totalEarned += amount;
+        runningBalance += amount;
+      } else if (entry.type === 'debit') {
+        totalPaid += amount;
+        runningBalance -= amount;
+      }
+      return { ...entry, running_balance: runningBalance };
+    });
+
+    // Sort back to latest first for frontend display
+    entriesWithBalance.sort((a, b) => {
+      const dateA = new Date(a.date);
+      const dateB = new Date(b.date);
+      return dateB - dateA;
+    });
+
+    const remaining = totalEarned - totalPaid;
+
+    res.json({
+      success: true,
+      entries: entriesWithBalance,
+      totals: {
+        total_earned: totalEarned,
+        total_paid: totalPaid,
+        remaining: remaining
+      },
+      labour: labourCheck.rows[0]
+    });
+
+  } catch (err) {
+    console.error("❌ Get Labour History Error:", err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 
 export default router;

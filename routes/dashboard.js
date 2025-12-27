@@ -17,113 +17,153 @@ router.get("/overview", async (req, res) => {
       });
     }
 
-    /* =========================
-       SCRAP IN (Today & Month)
-    ========================= */
-    const scrapInResult = await pool.query(
-      `
-      SELECT
+    // Helper for default empty
+    const safe = (v, d = 0) => (v === null || v === undefined ? d : v);
+
+    // SCRAP IN
+    const scrapIn = await pool.query(
+      `SELECT
         COALESCE(SUM(weight),0) FILTER (WHERE date::date = CURRENT_DATE) AS today,
-        COALESCE(SUM(weight),0)
-          FILTER (WHERE date >= date_trunc('month', CURRENT_DATE)) AS month
-      FROM maal_in
-      WHERE company_id = $1 AND godown_id = $2
-      `,
+        COALESCE(SUM(weight),0) FILTER (WHERE date >= date_trunc('month', CURRENT_DATE)) AS month,
+        COALESCE(SUM(weight),0) AS all_time
+      FROM maal_in WHERE company_id = $1 AND godown_id = $2`,
       [company_id, godown_id]
     );
 
-    /* =========================
-       SCRAP OUT (Today)
-    ========================= */
-    const scrapOutResult = await pool.query(
-      `
-      SELECT COALESCE(SUM(weight),0) AS today
-      FROM maal_out
-      WHERE company_id = $1
-        AND godown_id = $2
-        AND date::date = CURRENT_DATE
-      `,
+    // SCRAP OUT
+    const scrapOut = await pool.query(
+      `SELECT
+        COALESCE(SUM(weight),0) FILTER (WHERE date::date = CURRENT_DATE) AS today,
+        COALESCE(SUM(weight),0) FILTER (WHERE date >= date_trunc('month', CURRENT_DATE)) AS month,
+        COALESCE(SUM(weight),0) AS all_time
+      FROM maal_out WHERE company_id = $1 AND godown_id = $2`,
       [company_id, godown_id]
     );
 
-    /* =========================
-       CASH & BANK (ROKADI)
-    ========================= */
+    // EXPENSES
+    const expenses = await pool.query(
+      `SELECT
+        COALESCE(SUM(amount),0) FILTER (WHERE date::date = CURRENT_DATE) AS today,
+        COALESCE(SUM(amount),0) FILTER (WHERE date >= date_trunc('month', CURRENT_DATE)) AS month,
+        COALESCE(SUM(amount),0) AS all_time
+      FROM expenses WHERE company_id = $1 AND godown_id = $2`,
+      [company_id, godown_id]
+    );
+
+    // TRUCK
+    const truck = await pool.query(
+      `SELECT
+        COUNT(*) FILTER (WHERE date::date = CURRENT_DATE) AS today,
+        COUNT(*) FILTER (WHERE date >= date_trunc('month', CURRENT_DATE)) AS month,
+        COUNT(*) AS all_time
+      FROM truck_records WHERE company_id = $1 AND godown_id = $2`,
+      [company_id, godown_id]
+    );
+
+    // FERIWALA
+    const feriwala = await pool.query(
+      `SELECT
+        COUNT(*) FILTER (WHERE date::date = CURRENT_DATE) AS today,
+        COUNT(*) FILTER (WHERE date >= date_trunc('month', CURRENT_DATE)) AS month,
+        COUNT(*) AS all_time
+      FROM feriwala_records WHERE company_id = $1 AND godown_id = $2`,
+      [company_id, godown_id]
+    );
+
+    // KABADIWALA
+    const kabadiwala = await pool.query(
+      `SELECT
+        COUNT(*) FILTER (WHERE date::date = CURRENT_DATE) AS today,
+        COUNT(*) FILTER (WHERE date >= date_trunc('month', CURRENT_DATE)) AS month,
+        COUNT(*) AS all_time
+      FROM kabadiwala_records WHERE company_id = $1 AND godown_id = $2`,
+      [company_id, godown_id]
+    );
+
+    // LABOUR
+    const labour = await pool.query(
+      `SELECT
+        COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE) AS today,
+        COUNT(*) FILTER (WHERE created_at >= date_trunc('month', CURRENT_DATE)) AS month,
+        COUNT(*) AS all_time
+      FROM labour WHERE company_id = $1 AND godown_id = $2`,
+      [company_id, godown_id]
+    );
+
+    // CASH & BANK (ROKADI)
     const cashResult = await pool.query(
-      `
-      SELECT
+      `SELECT
         COALESCE(SUM(balance),0) FILTER (WHERE account_type = 'cash') AS cash,
         COALESCE(SUM(balance),0) FILTER (WHERE account_type = 'bank') AS bank
-      FROM rokadi_accounts
-      WHERE company_id = $1 AND godown_id = $2
-      `,
+      FROM rokadi_accounts WHERE company_id = $1 AND godown_id = $2`,
       [company_id, godown_id]
     );
 
-    /* =========================
-       SCRAP BY MATERIAL (Today)
-    ========================= */
+    // SCRAP BY MATERIAL (Today)
     const scrapByMaterialResult = await pool.query(
-      `
-      SELECT material, COALESCE(SUM(weight),0) AS weight
-      FROM maal_in
-      WHERE company_id = $1
-        AND godown_id = $2
-        AND date::date = CURRENT_DATE
-      GROUP BY material
-      ORDER BY material
-      `,
+      `SELECT material, COALESCE(SUM(weight),0) AS weight
+      FROM maal_in WHERE company_id = $1 AND godown_id = $2 AND date::date = CURRENT_DATE
+      GROUP BY material ORDER BY material`,
       [company_id, godown_id]
     );
 
-    /* =========================
-       💰 EXPENSE ANALYTICS (MONTH)
-       PhonePe-style summary
-    ========================= */
+    // EXPENSE ANALYTICS (MONTH)
     const expenseSummaryResult = await pool.query(
-      `
-      SELECT
-        category,
-        COUNT(*) AS payments,
-        COALESCE(SUM(amount),0) AS total
-      FROM expenses
-      WHERE company_id = $1
-        AND godown_id = $2
-        AND date >= date_trunc('month', CURRENT_DATE)
-      GROUP BY category
-      ORDER BY total DESC
-      `,
+      `SELECT category, COUNT(*) AS payments, COALESCE(SUM(amount),0) AS total
+      FROM expenses WHERE company_id = $1 AND godown_id = $2 AND date >= date_trunc('month', CURRENT_DATE)
+      GROUP BY category ORDER BY total DESC`,
       [company_id, godown_id]
     );
 
-    /* =========================
-       FINAL RESPONSE
-    ========================= */
     res.json({
       success: true,
-
-      scrap_in: {
-        nd: Number(scrapInResult.rows[0].today),
-        mo: Number(scrapInResult.rows[0].month),
+      analytics: {
+        scrap_in: {
+          today: safe(scrapIn.rows[0]?.today),
+          month: safe(scrapIn.rows[0]?.month),
+          all_time: safe(scrapIn.rows[0]?.all_time),
+        },
+        scrap_out: {
+          today: safe(scrapOut.rows[0]?.today),
+          month: safe(scrapOut.rows[0]?.month),
+          all_time: safe(scrapOut.rows[0]?.all_time),
+        },
+        expenses: {
+          today: safe(expenses.rows[0]?.today),
+          month: safe(expenses.rows[0]?.month),
+          all_time: safe(expenses.rows[0]?.all_time),
+        },
+        truck: {
+          today: safe(truck.rows[0]?.today),
+          month: safe(truck.rows[0]?.month),
+          all_time: safe(truck.rows[0]?.all_time),
+        },
+        feriwala: {
+          today: safe(feriwala.rows[0]?.today),
+          month: safe(feriwala.rows[0]?.month),
+          all_time: safe(feriwala.rows[0]?.all_time),
+        },
+        kabadiwala: {
+          today: safe(kabadiwala.rows[0]?.today),
+          month: safe(kabadiwala.rows[0]?.month),
+          all_time: safe(kabadiwala.rows[0]?.all_time),
+        },
+        labour: {
+          today: safe(labour.rows[0]?.today),
+          month: safe(labour.rows[0]?.month),
+          all_time: safe(labour.rows[0]?.all_time),
+        },
+        cash: {
+          rokadi: safe(cashResult.rows[0]?.cash),
+          bank: safe(cashResult.rows[0]?.bank),
+        },
+        scrap_by_material: scrapByMaterialResult.rows || [],
+        expense_summary: expenseSummaryResult.rows.map((r) => ({
+          category: r.category,
+          payments: Number(r.payments),
+          total: Number(r.total),
+        })),
       },
-
-      scrap_out: {
-        nd: Number(scrapOutResult.rows[0].today),
-      },
-
-      cash: {
-        rokadi: Number(cashResult.rows[0].cash),
-        bank: Number(cashResult.rows[0].bank),
-      },
-
-      scrap_by_material: scrapByMaterialResult.rows,
-
-      // ✅ NEW — SAFE FOR FRONTEND
-      expense_summary: expenseSummaryResult.rows.map((r) => ({
-        category: r.category,
-        payments: Number(r.payments),
-        total: Number(r.total),
-      })),
     });
   } catch (err) {
     console.error("❌ DASHBOARD ERROR:", err.message);
