@@ -449,17 +449,7 @@ router.get("/history/:labour_id", async (req, res) => {
       [labour_id, company_id, godown_id]
     );
 
-    // Get expense entries related to this labour
-    const expenseQuery = await client.query(
-      `SELECT id, date, amount, 'Expense' as entry_type, 
-              payment_mode as mode, description
-       FROM expenses 
-       WHERE labour_id = $1 AND company_id = $2 AND godown_id = $3
-       ORDER BY date DESC, created_at DESC`,
-      [labour_id, company_id, godown_id]
-    );
-
-    // Combine all entries with improved fields
+    // Combine only salary and withdrawal entries (no expenses)
     const allEntries = [
       ...salaryQuery.rows.map(entry => ({
         ...entry,
@@ -475,14 +465,6 @@ router.get("/history/:labour_id", async (req, res) => {
         label: 'Withdrawal',
         remarks: entry.remarks || '',
         mode: entry.mode || 'Cash',
-        type: 'debit',
-      })),
-      ...expenseQuery.rows.map(entry => ({
-        ...entry,
-        source: 'expense',
-        label: 'Expense',
-        remarks: entry.description || '',
-        mode: entry.mode || 'N/A',
         type: 'debit',
       }))
     ];
