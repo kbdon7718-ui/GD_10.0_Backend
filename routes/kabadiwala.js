@@ -336,6 +336,60 @@ ORDER BY kr.date ASC;
   }
 });
 
+/* --------------------------------------------------------
+   2️⃣ LIST PURCHASES (MANAGER)
+-------------------------------------------------------- */
+router.get("/list", async (req, res) => {
+  try {
+    const { company_id, godown_id } = req.query;
+
+    if (!company_id || !godown_id) {
+      return res.status(400).json({ error: "company_id and godown_id required" });
+    }
+
+    const mainQ = await pool.query(
+      `
+      SELECT
+        kr.id,
+        kr.date,
+        kr.company_id,
+        kr.godown_id,
+        kr.vendor_id,
+        kr.kabadiwala_name,
+        kr.total_amount,
+        kr.payment_status,
+        v.name AS vendor_name
+      FROM kabadiwala_records kr
+      LEFT JOIN vendors v ON v.id = kr.vendor_id
+      WHERE kr.company_id = $1
+        AND kr.godown_id = $2
+      ORDER BY kr.date DESC
+    `,
+      [company_id, godown_id]
+    );
+
+    const records = mainQ.rows;
+
+    for (const r of records) {
+      const scrapsQ = await pool.query(
+        `
+        SELECT material, weight, rate, amount
+        FROM kabadiwala_scraps
+        WHERE kabadiwala_id = $1
+      `,
+        [r.id]
+      );
+      r.scraps = scrapsQ.rows;
+    }
+
+    res.json({ success: true, kabadiwala: records });
+  } catch (err) {
+    console.error("❌ KABADIWALA LIST ERROR:", err.message);
+    res.status(500).json({ error: "Failed to load records" });
+  }
+});
+
 
 
 export default router;
+
