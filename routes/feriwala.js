@@ -72,7 +72,7 @@ router.post("/add", async (req, res) => {
 
       const vendor_rate = Number(rateQuery.rows[0].vendor_rate);
       const material = rateQuery.rows[0].material_type;
-      const weight = Number(s.weight);
+      const weight = Number(s.weight  || 0);
       const amount = vendor_rate * weight;
 
       totalAmount += amount;
@@ -110,23 +110,6 @@ const rokadiAccountType =
     : "bank";
 
 // get rokadi account
-const rokadiAccRes = await client.query(
-  `
-  SELECT id, balance
-  FROM rokadi_accounts
-  WHERE company_id = $1
-    AND godown_id = $2
-    AND account_type = $3
-  LIMIT 1
-  `,
-  [company_id, godown_id, rokadiAccountType]
-);
-
-if (rokadiAccRes.rowCount === 0) {
-  throw new Error(`Rokadi ${rokadiAccountType} account not found`);
-}
-
-const rokadiAccountId = rokadiAccRes.rows[0].id;
 
 // insert rokadi transaction (DEBIT)
 await client.query(
