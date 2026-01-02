@@ -448,10 +448,11 @@ router.get("/ledger", async (req, res) => {
       return res.status(400).json({ error: "Missing required params" });
     }
 
-    /* =========================
-       FETCH PURCHASES (CREDIT)
+     /* =========================
+       FETCH PURCHASES
        material + weight + rate
-    ========================= */
+       NOTE: purchase makes balance more NEGATIVE (payable)
+     ========================= */
     const purchases = await pool.query(
       `
       SELECT 
@@ -472,9 +473,10 @@ router.get("/ledger", async (req, res) => {
       [company_id, godown_id, vendor_id]
     );
 
-    /* =========================
-       FETCH PAYMENTS (DEBIT)
-    ========================= */
+     /* =========================
+       FETCH PAYMENTS
+       NOTE: payment makes balance more POSITIVE (advance)
+     ========================= */
     const payments = await pool.query(
       `
       SELECT 
@@ -504,9 +506,9 @@ router.get("/ledger", async (req, res) => {
 
     const ledgerWithBalance = ledger.map((row) => {
       if (row.type === "purchase") {
-        runningBalance += Number(row.amount);
-      } else {
         runningBalance -= Number(row.amount);
+      } else {
+        runningBalance += Number(row.amount);
       }
 
       return {

@@ -241,6 +241,14 @@ router.post("/add-payment", async (req, res) => {
 
     const rokadiAccountId = bankAccountRes.rows[0].account_id;
 
+    // Lock the rokadi account row so balance checks are stable and to avoid
+    // double-applying changes if a DB trigger already updates balances.
+    const beforeBalRes = await client.query(
+      `select balance::numeric as balance from rokadi_accounts where id=$1 for update`,
+      [rokadiAccountId]
+    );
+    const beforeBalance = Number(beforeBalRes.rows[0]?.balance ?? 0);
+
     /* ===========================
        3️⃣ Insert Rokadi CREDIT
     ============================ */
@@ -272,14 +280,24 @@ router.post("/add-payment", async (req, res) => {
     /* ===========================
        4️⃣ Update Rokadi Balance
     ============================ */
-    await client.query(
-      `
-      update rokadi_accounts
-      set balance = balance + $1
-      where id = $2
-      `,
-      [amount, rokadiAccountId]
+    const afterBalRes = await client.query(
+      `select balance::numeric as balance from rokadi_accounts where id=$1`,
+      [rokadiAccountId]
     );
+    const afterBalance = Number(afterBalRes.rows[0]?.balance ?? 0);
+
+    // If balance didn't change after inserting the transaction, apply the manual update.
+    // If balance already changed (e.g., trigger-based), skip to avoid double credit.
+    if (afterBalance === beforeBalance) {
+      await client.query(
+        `
+        update rokadi_accounts
+        set balance = balance + $1
+        where id = $2
+        `,
+        [amount, rokadiAccountId]
+      );
+    }
 
     await client.query("COMMIT");
 

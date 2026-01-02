@@ -321,31 +321,124 @@ router.get("/balances", async (req, res) => {
   try {
     const { company_id, godown_id, date } = req.query;
 
+    const effectiveDate = date || new Date().toISOString().split("T")[0];
+
     const result = await pool.query(
       `
      SELECT
-  d.vendor_id,
-  v.name AS vendor_name,
-  d.current_balance AS balance
-FROM kabadiwala_daily_balance d
-JOIN vendors v ON v.id = d.vendor_id
-WHERE d.company_id = $1
-  AND d.godown_id = $2
-  AND d.date = $3::date
-ORDER BY v.name;
+       d.vendor_id,
+       v.name AS vendor_name,
+       d.previous_balance,
+       d.purchase_amount,
+       d.paid_amount,
+       d.current_balance
+     FROM kabadiwala_daily_balance d
+     JOIN vendors v ON v.id = d.vendor_id
+     WHERE d.company_id = $1
+       AND d.godown_id = $2
+       AND d.date = $3::date
+     ORDER BY v.name;
 
       `,
-      [
-        company_id,
-        godown_id,
-        date || new Date().toISOString().split("T")[0],
-      ]
+      [company_id, godown_id, effectiveDate]
     );
 
-    res.json({ success: true, balances: result.rows });
+    // DB stores "payable" as positive (purchase - paid). UI rule wants:
+    // purchase => negative/red, payment/advance => positive/green.
+    const balances = result.rows.map((r) => {
+      const previousBalance = -Number(r.previous_balance || 0);
+      const todayPurchase = Number(r.purchase_amount || 0);
+      const todayPaid = Number(r.paid_amount || 0);
+      const currentBalance = -Number(r.current_balance || 0);
+
+      return {
+        vendor_id: r.vendor_id,
+        vendor_name: r.vendor_name,
+        previous_balance: previousBalance,
+        today_purchase: todayPurchase,
+        today_paid: todayPaid,
+        current_balance: currentBalance,
+        balance: currentBalance,
+      };
+    });
+
+    res.json({ success: true, balances });
   } catch (err) {
     console.error("❌ KABADIWALA BALANCES:", err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+/* ============================================================
+   OWNER — KABADIWALA LEDGER (FULL HISTORY)
+   purchase => negative, payment => positive
+============================================================ */
+router.get("/ledger", async (req, res) => {
+  try {
+    const { company_id, godown_id, vendor_id } = req.query;
+
+    if (!company_id || !godown_id || !vendor_id) {
+      return res.status(400).json({ error: "Missing required params" });
+    }
+
+    const purchases = await pool.query(
+      `
+      SELECT
+        kr.date,
+        'purchase' AS type,
+        string_agg(
+          ks.material || ' (' || ks.weight || 'kg × ₹' || ks.rate || ')',
+          E'\n'
+        ) AS description,
+        kr.total_amount AS amount
+      FROM kabadiwala_records kr
+      JOIN kabadiwala_scraps ks ON ks.kabadiwala_id = kr.id
+      WHERE kr.company_id = $1
+        AND kr.godown_id = $2
+        AND kr.vendor_id = $3
+      GROUP BY kr.id, kr.date, kr.total_amount
+      `,
+      [company_id, godown_id, vendor_id]
+    );
+
+    const payments = await pool.query(
+      `
+      SELECT
+        p.date,
+        'payment' AS type,
+        COALESCE(NULLIF(p.note, ''), 'Payment') AS description,
+        p.amount AS amount
+      FROM kabadiwala_payments p
+      JOIN kabadiwala_records kr ON kr.id = p.kabadiwala_id
+      WHERE kr.company_id = $1
+        AND kr.godown_id = $2
+        AND kr.vendor_id = $3
+      `,
+      [company_id, godown_id, vendor_id]
+    );
+
+    const merged = [...purchases.rows, ...payments.rows].sort(
+      (a, b) => new Date(a.date) - new Date(b.date)
+    );
+
+    let runningBalance = 0;
+    const ledger = merged.map((row) => {
+      if (row.type === "purchase") {
+        runningBalance -= Number(row.amount);
+      } else {
+        runningBalance += Number(row.amount);
+      }
+
+      return {
+        ...row,
+        balance: runningBalance,
+      };
+    });
+
+    res.json({ success: true, ledger, outstanding: runningBalance });
+  } catch (err) {
+    console.error("❌ KABADIWALA LEDGER:", err.message);
+    res.status(500).json({ error: "Failed to load ledger" });
   }
 });
 /* ============================================================
