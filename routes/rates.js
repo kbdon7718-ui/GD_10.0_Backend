@@ -147,6 +147,7 @@ router.post("/add-vendor", async (req, res) => {
    SET VENDOR RATE
 -------------------------------------------------------- */
 router.post("/set-vendor-rate", async (req, res) => {
+  const client = await pool.connect();
   try {
     const { vendor_id, scrap_type_id, vendor_rate } = req.body;
 
@@ -168,20 +169,39 @@ router.post("/set-vendor-rate", async (req, res) => {
     const rate_offset =
       Number(vendor_rate) - Number(globalRateRes.rows[0].global_rate);
 
-    const inserted = await pool.query(
-      `INSERT INTO vendor_rates (id, vendor_id, scrap_type_id, vendor_rate, rate_offset)
-       VALUES (uuid_generate_v4(), $1, $2, $3, $4)
-       ON CONFLICT (vendor_id, scrap_type_id) DO UPDATE
-       SET vendor_rate = EXCLUDED.vendor_rate,
-           rate_offset = EXCLUDED.rate_offset
-       RETURNING *`,
-      [vendor_id, scrap_type_id, vendor_rate, rate_offset]
+    await client.query("BEGIN");
+
+    const updated = await client.query(
+      `
+      UPDATE vendor_rates
+      SET vendor_rate = $1, rate_offset = $2
+      WHERE vendor_id = $3 AND scrap_type_id = $4
+      RETURNING *
+      `,
+      [vendor_rate, rate_offset, vendor_id, scrap_type_id]
     );
 
-    res.json({ success: true, vendorRate: inserted.rows[0] });
+    let vendorRateRow = updated.rows[0];
+    if (!vendorRateRow) {
+      const inserted = await client.query(
+        `
+        INSERT INTO vendor_rates (id, vendor_id, scrap_type_id, vendor_rate, rate_offset)
+        VALUES (uuid_generate_v4(), $1, $2, $3, $4)
+        RETURNING *
+        `,
+        [vendor_id, scrap_type_id, vendor_rate, rate_offset]
+      );
+      vendorRateRow = inserted.rows[0];
+    }
+
+    await client.query("COMMIT");
+    res.json({ success: true, vendorRate: vendorRateRow });
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error("❌ set-vendor-rate:", err);
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 

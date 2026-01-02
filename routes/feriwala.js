@@ -1,8 +1,107 @@
 // backend/routes/feriwala.js
 import express from "express";
 import { pool } from "../config/db.js";
+import { randomUUID } from "crypto";
 
 const router = express.Router();
+
+/* --------------------------------------------------------
+   Helper: upsertDailyBalance (feriwala)
+-------------------------------------------------------- */
+async function upsertDailyBalance(client, company_id, godown_id, vendor_id, date) {
+  const prevPurchRes = await client.query(
+    `SELECT COALESCE(SUM(total_amount),0) AS prev_purchase
+     FROM feriwala_records
+     WHERE company_id=$1 AND godown_id=$2 AND vendor_id=$3 AND date < $4::date`,
+    [company_id, godown_id, vendor_id, date]
+  );
+
+  const prevPaidRes = await client.query(
+    `SELECT COALESCE(SUM(amount),0) AS prev_paid
+     FROM feriwala_withdrawals
+     WHERE company_id=$1
+       AND godown_id=$2
+       AND vendor_id=$3
+       AND date < $4::date`,
+    [company_id, godown_id, vendor_id, date]
+  );
+
+  const todayPurchaseRes = await client.query(
+    `SELECT COALESCE(SUM(total_amount),0) AS today_purchase
+     FROM feriwala_records
+     WHERE company_id=$1 AND godown_id=$2 AND vendor_id=$3 AND date = $4::date`,
+    [company_id, godown_id, vendor_id, date]
+  );
+
+  const todayPaidRes = await client.query(
+    `SELECT COALESCE(SUM(amount),0) AS today_paid
+     FROM feriwala_withdrawals
+     WHERE company_id=$1 AND godown_id=$2 AND vendor_id=$3 AND date = $4::date`,
+    [company_id, godown_id, vendor_id, date]
+  );
+
+  const previous_balance =
+    Number(prevPurchRes.rows[0].prev_purchase) -
+    Number(prevPaidRes.rows[0].prev_paid);
+
+  const current_balance =
+    previous_balance +
+    Number(todayPurchaseRes.rows[0].today_purchase) -
+    Number(todayPaidRes.rows[0].today_paid);
+
+  const todayPurchase = Number(todayPurchaseRes.rows[0].today_purchase);
+  const todayPaid = Number(todayPaidRes.rows[0].today_paid);
+
+  const existing = await client.query(
+    `
+    SELECT id
+    FROM feriwala_daily_balances
+    WHERE company_id=$1 AND godown_id=$2 AND vendor_id=$3 AND date=$4::date
+    LIMIT 1
+    `,
+    [company_id, godown_id, vendor_id, date]
+  );
+
+  if (existing.rowCount) {
+    await client.query(
+      `
+      UPDATE feriwala_daily_balances
+      SET
+        previous_balance = $1,
+        purchase_amount = $2,
+        paid_amount = $3,
+        current_balance = $4,
+        balance = $4
+      WHERE id = $5
+      `,
+      [previous_balance, todayPurchase, todayPaid, current_balance, existing.rows[0].id]
+    );
+  } else {
+    await client.query(
+      `
+      INSERT INTO feriwala_daily_balances
+      (
+        id, company_id, godown_id, vendor_id, date,
+        previous_balance, purchase_amount, paid_amount, current_balance, balance,
+        created_at
+      )
+      VALUES
+      ($1,$2,$3,$4,$5::date,$6,$7,$8,$9,$9,NOW())
+      `,
+      [
+        randomUUID(),
+        company_id,
+        godown_id,
+        vendor_id,
+        date,
+        previous_balance,
+        todayPurchase,
+        todayPaid,
+        current_balance,
+      ]
+    );
+  }
+}
 
 /* --------------------------------------------------------
    1️⃣ ADD NEW FERIWALA PURCHASE
@@ -14,10 +113,12 @@ router.post("/add", async (req, res) => {
     const { company_id, godown_id, vendor_id, scraps, account_id } = req.body;
 
     if (!company_id || !godown_id || !vendor_id || !scraps?.length) {
+      await client.query("ROLLBACK");
       return res.status(400).json({ error: "Missing required fields" });
     }
 
     if (!account_id) {
+      await client.query("ROLLBACK");
       return res.status(400).json({ error: "Account ID is required" });
     }
 
@@ -29,25 +130,26 @@ router.post("/add", async (req, res) => {
       [vendor_id]
     );
 
-    if (vendorRes.rowCount === 0)
+    if (vendorRes.rowCount === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "Vendor not found" });
+    }
 
     const vendor_name = vendorRes.rows[0].vendor_name;
 
     let totalAmount = 0;
 
     /* CREATE MAIN FERIWALA RECORD */
-    const mainRecord = await client.query(
+    const feriwala_id = randomUUID();
+
+    await client.query(
       `
       INSERT INTO feriwala_records 
       (id, company_id, godown_id, vendor_id, date, total_amount, created_at)
-      VALUES (uuid_generate_v4(), $1, $2, $3, CURRENT_DATE, 0, NOW())
-      RETURNING id;
+      VALUES ($1, $2, $3, $4, CURRENT_DATE, 0, NOW())
     `,
-      [company_id, godown_id, vendor_id]
+      [feriwala_id, company_id, godown_id, vendor_id]
     );
-
-    const feriwala_id = mainRecord.rows[0].id;
 
     /* PROCESS SCRAPS */
     for (const s of scraps) {
@@ -78,13 +180,14 @@ router.post("/add", async (req, res) => {
       totalAmount += amount;
 
       /* INSERT SCRAP ENTRY */
+      const scrapId = randomUUID();
       await client.query(
         `
         INSERT INTO feriwala_scraps 
         (id, feriwala_id, material, weight, rate, amount)
-        VALUES (uuid_generate_v4(), $1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, $6)
       `,
-        [feriwala_id, material, weight, vendor_rate, amount]
+        [scrapId, feriwala_id, material, weight, vendor_rate, amount]
       );
     }
 
@@ -97,66 +200,8 @@ router.post("/add", async (req, res) => {
     `,
       [totalAmount, feriwala_id]
     );
-
-    /* =====================================================
-   🔻 AUTO DEBIT ROKADI FOR FERIWALA PURCHASE
-===================================================== */
-
-// decide source (cash / bank)
-const rokadiAccountType =
-  req.body.payment_mode &&
-  req.body.payment_mode.toLowerCase() === "cash"
-    ? "cash"
-    : "bank";
-
-// get rokadi account
-const rokadiAccRes = await client.query(
-  `
-  SELECT id, balance
-  FROM rokadi_accounts
-  WHERE company_id = $1
-    AND godown_id = $2
-    AND account_type = $3
-  LIMIT 1
-  `,
-  [company_id, godown_id, rokadiAccountType]
-);
-
-if (rokadiAccRes.rowCount === 0) {
-  throw new Error(`Rokadi ${rokadiAccountType} account not found`);
-}
-
-const rokadiAccountId = rokadiAccRes.rows[0].id;
-// insert rokadi transaction (DEBIT)
-await client.query(
-  `
-  INSERT INTO rokadi_transactions
-  (id, company_id, godown_id, account_id,
-   type, amount, category, reference, created_at)
-  VALUES
-  (uuid_generate_v4(), $1, $2, $3,
-   'debit', $4, 'feriwala', $5, NOW())
-  `,
-  [
-    company_id,
-    godown_id,
-    rokadiAccountId,
-    totalAmount,
-    `Feriwala purchase: ${vendor_name}`,
-  ]
-);
-
-// update rokadi balance
-await client.query(
-  `
-  UPDATE rokadi_accounts
-  SET balance = balance - $1
-  WHERE id = $2
-  `,
-  [totalAmount, rokadiAccountId]
-);
-
-
+    /* Update daily balances (upsert) to avoid unique-constraint on repeat adds */
+    await upsertDailyBalance(client, company_id, godown_id, vendor_id, new Date().toISOString().slice(0, 10));
     await client.query("COMMIT");
 
     res.json({
@@ -167,9 +212,16 @@ await client.query(
       message: "Feriwala purchase added successfully",
     });
   } catch (err) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch (e) {}
     console.error("❌ Feriwala ADD Error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    const payload = { error: "Internal server error" };
+    if (process.env.NODE_ENV !== "production") {
+      payload.detail = err.message;
+      payload.stack = err.stack;
+    }
+    res.status(500).json(payload);
   } finally {
     client.release();
   }
@@ -276,23 +328,51 @@ router.post("/withdrawal", async (req, res) => {
 
     await client.query("BEGIN");
 
-    try {
+    const withdrawalId = randomUUID();
+    await client.query(
+      `
+      INSERT INTO feriwala_withdrawals 
+      (id, company_id, godown_id, vendor_id, amount, date, note, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+    `,
+      [withdrawalId, company_id, godown_id, vendor_id, amount, date, note || ""]
+    );
+
+    /* keep daily balances in sync */
+    await upsertDailyBalance(client, company_id, godown_id, vendor_id, date || new Date().toISOString().slice(0,10));
+
+    /* Insert corresponding ROKADI transaction and update rokadi account balance */
+    const rokadiType = (req.body.mode || 'cash') === 'cash' ? 'cash' : 'bank';
+
+    const rAccRes = await client.query(
+      `SELECT id FROM rokadi_accounts WHERE company_id=$1 AND godown_id=$2 AND account_type=$3 LIMIT 1`,
+      [company_id, godown_id, rokadiType]
+    );
+
+    if (rAccRes.rowCount) {
+      const rokadiAccountId = rAccRes.rows[0].id;
+      const vendorName = (await client.query(`SELECT name FROM vendors WHERE id=$1`, [vendor_id])).rows[0]?.name;
+      const displayRef = vendorName ? `Payment to ${vendorName}` : null;
+      const internalRef = `feriwala_withdrawal:${withdrawalId}`;
+      const metadata = {
+        source: "feriwala",
+        vendor_id,
+        withdrawal_id: withdrawalId,
+        note: displayRef,
+      };
+
       await client.query(
         `
-        INSERT INTO feriwala_withdrawals 
-        (id, company_id, godown_id, vendor_id, amount, date, note, created_at)
-        VALUES (uuid_generate_v4(), $1,$2,$3,$4,$5,$6,NOW())
-      `,
-        [company_id, godown_id, vendor_id, amount, date, note || ""]
+        INSERT INTO rokadi_transactions
+          (id, company_id, godown_id, account_id, type, amount, category, reference, metadata, created_at)
+        VALUES ($1,$2,$3,$4,'debit',$5,'feriwala',$6,$7::jsonb,NOW())
+        `,
+        [randomUUID(), company_id, godown_id, rokadiAccountId, amount, internalRef, JSON.stringify(metadata)]
       );
-    } catch {
+
       await client.query(
-        `
-        INSERT INTO feriwala_withdrawals 
-        (id, company_id, godown_id, vendor_id, amount, date, created_at)
-        VALUES (uuid_generate_v4(), $1,$2,$3,$4,$5,NOW())
-      `,
-        [company_id, godown_id, vendor_id, amount, date]
+        `UPDATE rokadi_accounts SET balance = balance - $1 WHERE id=$2`,
+        [amount, rokadiAccountId]
       );
     }
 

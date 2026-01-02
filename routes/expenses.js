@@ -1,5 +1,6 @@
 import express from "express";
 import { pool } from "../config/db.js";
+import { randomUUID } from "crypto";
 
 const router = express.Router();
 
@@ -90,7 +91,6 @@ router.post("/", async (req, res) => {
         amount,
         pm,
         paid_to || "",
-        //account_id,
       ]
     );
 
@@ -165,36 +165,29 @@ router.post("/", async (req, res) => {
     /* =====================================================
        ROKADI TRANSACTION
     ===================================================== */
+    const displayRef = `${category}: ${paid_to || description || ""}`;
+    const displayRefVal = displayRef && String(displayRef).trim() ? String(displayRef).trim() : null;
+    const txnId = randomUUID();
+    const internalRef = `expense:${expense_id}`;
+    const metadata = {
+      source: "expense",
+      expense_id,
+      note: displayRefVal,
+    };
+
     await client.query(
       `
       INSERT INTO rokadi_transactions
-      (
-        account_id,
-        company_id,
-        godown_id,
-        type,
-        amount,
-        category,
-        reference,
-        created_at
-      )
+        (id, account_id, company_id, godown_id, type, amount, category, reference, metadata, created_at)
       VALUES
-      (
-        $1,$2,$3,
-        'debit',
-        $4::numeric,
-        'expense',
-        $5,
-        NOW()
-      )
+        ($1,$2,$3,$4,'debit',$5::numeric,'expense',$6,$7::jsonb,NOW())
       `,
-      [
-        account_id,
-        company_id,
-        godown_id,
-        amount,
-        `${category}: ${paid_to || description || ""}`,
-      ]
+      [txnId, account_id, company_id, godown_id, amount, internalRef, JSON.stringify(metadata)]
+    );
+
+    await client.query(
+      `UPDATE rokadi_accounts SET balance = balance - $1 WHERE id=$2`,
+      [amount, account_id]
     );
 
     await client.query("COMMIT");
@@ -298,7 +291,7 @@ router.delete("/delete/:id", async (req, res) => {
         exp.company_id,
         exp.godown_id,
         exp.amount,
-        `DELETE: ${exp.category}`,
+        `expense_reversal:${req.params.id}:${randomUUID()}`,
       ]
     );
 

@@ -1,6 +1,7 @@
 // routes/maalOut.js
 import express from "express";
 import { pool } from "../config/db.js";
+import { randomUUID } from "crypto";
 
 const router = express.Router();
 
@@ -243,19 +244,28 @@ router.post("/add-payment", async (req, res) => {
     /* ===========================
        3️⃣ Insert Rokadi CREDIT
     ============================ */
+    const displayRef = `Mill payment: ${firm_name}`;
+    const internalRef = `maal_out_payment:${paymentId}`;
+    const metadata = {
+      source: "maal_out",
+      maal_out_payment_id: paymentId,
+      note: displayRef,
+    };
     await client.query(
       `
       insert into rokadi_transactions
-        (account_id, company_id, godown_id, type, amount, reference, category)
+        (id, account_id, company_id, godown_id, type, amount, reference, metadata, category)
       values
-        ($1, $2, $3, 'credit', $4, $5, 'mill_payment')
+        ($1, $2, $3, $4, 'credit', $5, $6, $7::jsonb, 'mill_payment')
       `,
       [
+        randomUUID(),
         rokadiAccountId,
         company_id,
         godown_id,
         amount,
-        `Mill payment: ${firm_name}`,
+        internalRef,
+        JSON.stringify(metadata),
       ]
     );
 

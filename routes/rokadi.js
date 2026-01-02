@@ -1,5 +1,6 @@
 import express from "express";
 import { pool } from "../config/db.js";
+import { randomUUID } from "crypto";
 
 const router = express.Router();
 
@@ -73,6 +74,11 @@ router.post("/add-manual", async (req, res) => {
     await client.query("BEGIN");
 
     /* ---------- INSERT TRANSACTION ---------- */
+    const note = reference && String(reference).trim() ? String(reference).trim() : null;
+    const txnId = randomUUID();
+    const internalRef = `rokadi_manual:${txnId}`;
+    const metadata = note ? { note } : {};
+
     await client.query(
       `
       INSERT INTO rokadi_transactions
@@ -85,32 +91,34 @@ router.post("/add-manual", async (req, res) => {
         amount,
         category,
         reference,
+        metadata,
         created_by,
         created_at
       )
       VALUES
       (
-        uuid_generate_v4(),
-        $1,$2,$3,'credit',$4,$5,$6,$7,$8
+        $1,
+        $2,$3,$4,'credit',$5,$6,$7,$8,$9::jsonb,$10,$11
       )
       `,
       [
+        txnId,
         account_id,
         company_id,
         godown_id,
         amount,
         category,
-        reference,
+        internalRef,
+        JSON.stringify(metadata),
         created_by,
         date ? `${date} 00:00:00` : new Date(),
       ]
     );
 
-    /* ---------- UPDATE BALANCE ---------- 
     await client.query(
       `UPDATE rokadi_accounts SET balance = balance + $1 WHERE id = $2`,
       [amount, account_id]
-    );*/
+    );
 
     await client.query("COMMIT");
 
@@ -183,31 +191,36 @@ router.post("/debit", async (req, res) => {
     }
 
     /* ---------- INSERT TRANSACTION ---------- */
+    const note = reference && String(reference).trim() ? String(reference).trim() : null;
+    const txnId = randomUUID();
+    const internalRef = `rokadi_debit:${txnId}`;
+    const metadata = note ? { note } : {};
     await client.query(
       `
       INSERT INTO rokadi_transactions
       (id, account_id, company_id, godown_id,
-       type, amount, category, reference, created_at)
+       type, amount, category, reference, metadata, created_at)
       VALUES
-      (uuid_generate_v4(), $1, $2, $3,
-       'debit', $4, $5, $6, $7)
+      ($1, $2, $3, $4,
+       'debit', $5, $6, $7, $8::jsonb, $9)
       `,
       [
+        txnId,
         account.id,
         company_id,
         godown_id,
         amount,
         category,
-        reference,
+        internalRef,
+        JSON.stringify(metadata),
         date ? `${date} 00:00:00` : new Date(),
       ]
     );
 
-    /* ---------- UPDATE BALANCE ---------- 
     await client.query(
       `UPDATE rokadi_accounts SET balance = balance - $1 WHERE id = $2`,
       [amount, account.id]
-    );*/
+    );
 
     await client.query("COMMIT");
 
@@ -257,27 +270,114 @@ router.post("/add", async (req, res) => {
     await client.query("BEGIN");
 
     /* ---------- MAIN ENTRY ---------- */
-    await client.query(
-      `
-      INSERT INTO rokadi_transactions
-      (id, account_id, related_account_id, company_id, godown_id,
-       type, amount, category, reference, created_by, created_at)
-      VALUES
-      (uuid_generate_v4(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-      `,
-      [
-        account_id,
-        related_account_id,
-        company_id,
-        godown_id,
-        type,
-        amount,
-        category,
-        reference,
-        created_by,
-        date ? `${date} 00:00:00` : new Date(),
-      ]
-    );
+    const note = reference && String(reference).trim() ? String(reference).trim() : null;
+    const metadata = note ? { note } : {};
+
+    if (type === "transfer") {
+      if (!related_account_id) {
+        throw new Error("related_account_id is required for transfer");
+      }
+
+      const transferGroupId = randomUUID();
+
+      // debit/transfer entry (source)
+      await client.query(
+        `
+        INSERT INTO rokadi_transactions
+        (id, account_id, related_account_id, company_id, godown_id,
+         type, amount, category, reference, metadata, created_by, created_at)
+        VALUES
+        ($1, $2,$3,$4,$5,'transfer',$6,$7,$8,$9::jsonb,$10,$11)
+        `,
+        [
+          randomUUID(),
+          account_id,
+          related_account_id,
+          company_id,
+          godown_id,
+          amount,
+          category,
+          `rokadi_transfer:${transferGroupId}:debit`,
+          JSON.stringify(metadata),
+          created_by,
+          date ? `${date} 00:00:00` : new Date(),
+        ]
+      );
+
+      // credit entry (destination)
+      await client.query(
+        `
+        INSERT INTO rokadi_transactions
+        (id, account_id, related_account_id, company_id, godown_id,
+         type, amount, category, reference, metadata, created_by, created_at)
+        VALUES
+        ($1, $2,$3,$4,$5,'credit',$6,$7,$8,$9::jsonb,$10,$11)
+        `,
+        [
+          randomUUID(),
+          related_account_id,
+          account_id,
+          company_id,
+          godown_id,
+          amount,
+          category,
+          `rokadi_transfer:${transferGroupId}:credit`,
+          JSON.stringify(metadata),
+          created_by,
+          date ? `${date} 00:00:00` : new Date(),
+        ]
+      );
+
+      await client.query(
+        `UPDATE rokadi_accounts SET balance = balance - $1 WHERE id = $2`,
+        [amount, account_id]
+      );
+      await client.query(
+        `UPDATE rokadi_accounts SET balance = balance + $1 WHERE id = $2`,
+        [amount, related_account_id]
+      );
+    } else {
+      const txnId = randomUUID();
+      const internalRef = `rokadi:${txnId}`;
+
+      await client.query(
+        `
+        INSERT INTO rokadi_transactions
+        (id, account_id, related_account_id, company_id, godown_id,
+         type, amount, category, reference, metadata, created_by, created_at)
+        VALUES
+        ($1, $2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12)
+        `,
+        [
+          txnId,
+          account_id,
+          related_account_id,
+          company_id,
+          godown_id,
+          type,
+          amount,
+          category,
+          internalRef,
+          JSON.stringify(metadata),
+          created_by,
+          date ? `${date} 00:00:00` : new Date(),
+        ]
+      );
+
+      if (type === "credit") {
+        await client.query(
+          `UPDATE rokadi_accounts SET balance = balance + $1 WHERE id = $2`,
+          [amount, account_id]
+        );
+      }
+
+      if (type === "debit") {
+        await client.query(
+          `UPDATE rokadi_accounts SET balance = balance - $1 WHERE id = $2`,
+          [amount, account_id]
+        );
+      }
+    }
 
     /* ---------- TRANSFER SECOND ENTRY ---------- */
    /* ---------- UPDATE BALANCES ---------- 
@@ -310,22 +410,24 @@ if (type === "transfer" && related_account_id) {
  
 
   // ledger entry for destination
+  const refVal4 = reference && String(reference).trim() ? reference : null;
   await client.query(
     `
     INSERT INTO rokadi_transactions
     (id, account_id, related_account_id, company_id, godown_id,
      type, amount, category, reference, created_by, created_at)
     VALUES
-    (uuid_generate_v4(), $1,$2,$3,$4,'credit',$5,$6,$7,$8,$9)
+    ($1, $2,$3,$4,$5,'credit',$6,$7,$8,$9,$10)
     `,
     [
+      randomUUID(),
       related_account_id,
       account_id,
       company_id,
       godown_id,
       amount,
       category,
-      reference,
+      refVal4,
       created_by,
       date ? `${date} 00:00:00` : new Date(),
     ]
@@ -365,7 +467,7 @@ router.get("/history/bank", async (req, res) => {
         rt.type,                 -- credit | debit
         rt.amount,
         rt.category,
-        rt.reference,
+        COALESCE(rt.metadata->>'note', rt.reference) AS reference,
         rt.created_at AS date,
         ra.account_name
       FROM rokadi_transactions rt
@@ -409,7 +511,7 @@ router.get("/history/cash", async (req, res) => {        // ✅ NEW
         rt.type,               -- credit | debit
         rt.amount,
         rt.category,
-        rt.reference,
+        COALESCE(rt.metadata->>'note', rt.reference) AS reference,
         rt.created_at AS date,
         ra.account_name
       FROM rokadi_transactions rt

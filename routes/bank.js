@@ -1,5 +1,6 @@
 import express from "express";
 import { pool } from "../config/db.js";
+import { randomUUID } from "crypto";
 
 const router = express.Router();
 
@@ -61,7 +62,7 @@ router.get("/statement", async (req, res) => {
         rt.type,               -- credit | debit
         rt.amount,
         rt.category,
-        rt.reference,
+        COALESCE(rt.metadata->>'note', rt.reference) AS reference,
         rt.created_at AS date,
         ra.account_name
       FROM rokadi_transactions rt
@@ -109,6 +110,11 @@ router.post("/credit", async (req, res) => {
       return res.status(400).json({ error: "Amount must be > 0" });
     }
 
+    const note = reference && String(reference).trim() ? String(reference).trim() : null;
+    const txnId = randomUUID();
+    const internalRef = `bank_credit:${txnId}`;
+    const metadata = note ? { note } : {};
+
     await pool.query(
       `
       INSERT INTO rokadi_transactions
@@ -121,27 +127,32 @@ router.post("/credit", async (req, res) => {
         amount,
         category,
         reference,
+        metadata,
         created_at
       )
       VALUES
       (
-        uuid_generate_v4(),
-        $1,$2,$3,'credit',$4,$5,$6,$7
+        $1,
+        $2,$3,$4,'credit',$5,$6,$7,$8,$9::jsonb,$10
       )
       `,
       [
+        txnId,
         account_id,
         company_id,
         godown_id,
         amount,
         category,
-        reference,
+        internalRef,
+        JSON.stringify(metadata),
         date ? `${date} 00:00:00` : new Date(),
       ]
     );
 
-    // ❌ DO NOT UPDATE balance here
-    // ✅ trigger trg_update_rokadi_balance will do it
+    await pool.query(
+      `UPDATE rokadi_accounts SET balance = balance + $1 WHERE id = $2`,
+      [amount, account_id]
+    );
 
     res.json({ success: true, message: "Bank credited successfully" });
   } catch (err) {
@@ -174,6 +185,11 @@ router.post("/debit", async (req, res) => {
       return res.status(400).json({ error: "Amount must be > 0" });
     }
 
+    const note = reference && String(reference).trim() ? String(reference).trim() : null;
+    const txnId = randomUUID();
+    const internalRef = `bank_debit:${txnId}`;
+    const metadata = note ? { note } : {};
+
     await pool.query(
       `
       INSERT INTO rokadi_transactions
@@ -186,23 +202,31 @@ router.post("/debit", async (req, res) => {
         amount,
         category,
         reference,
+        metadata,
         created_at
       )
       VALUES
       (
-        uuid_generate_v4(),
-        $1,$2,$3,'debit',$4,$5,$6,$7
+        $1,
+        $2,$3,$4,'debit',$5,$6,$7,$8,$9::jsonb,$10
       )
       `,
       [
+        txnId,
         account_id,
         company_id,
         godown_id,
         amount,
         category,
-        reference,
+        internalRef,
+        JSON.stringify(metadata),
         date ? `${date} 00:00:00` : new Date(),
       ]
+    );
+
+    await pool.query(
+      `UPDATE rokadi_accounts SET balance = balance - $1 WHERE id = $2`,
+      [amount, account_id]
     );
 
     res.json({ success: true, message: "Bank debited successfully" });

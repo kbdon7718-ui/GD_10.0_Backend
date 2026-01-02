@@ -1,5 +1,6 @@
 import express from "express";
 import { pool } from "../config/db.js";
+import { randomUUID } from "crypto";
 
 const router = express.Router();
 
@@ -46,29 +47,48 @@ async function upsertDailyBalance(client, company_id, godown_id, vendor_id, date
     Number(todayPurchaseRes.rows[0].today_purchase) -
     Number(todayPaidRes.rows[0].today_paid);
 
-  await client.query(
-    `INSERT INTO kabadiwala_daily_balance
-     (id, company_id, godown_id, vendor_id, date,
-      previous_balance, purchase_amount, paid_amount, current_balance, created_at)
-     VALUES (uuid_generate_v4(), $1,$2,$3,$4,$5,$6,$7,$8,NOW())
-     ON CONFLICT (company_id, godown_id, vendor_id, date)
-     DO UPDATE SET
-       previous_balance = EXCLUDED.previous_balance,
-       purchase_amount = EXCLUDED.purchase_amount,
-       paid_amount = EXCLUDED.paid_amount,
-       current_balance = EXCLUDED.current_balance,
-       updated_at = NOW()`,
-    [
-      company_id,
-      godown_id,
-      vendor_id,
-      date,
-      previous_balance,
-      todayPurchaseRes.rows[0].today_purchase,
-      todayPaidRes.rows[0].today_paid,
-      current_balance,
-    ]
+  const todayPurchase = Number(todayPurchaseRes.rows[0].today_purchase);
+  const todayPaid = Number(todayPaidRes.rows[0].today_paid);
+
+  const existing = await client.query(
+    `
+    SELECT id
+    FROM kabadiwala_daily_balance
+    WHERE company_id=$1 AND godown_id=$2 AND vendor_id=$3 AND date=$4::date
+    LIMIT 1
+    `,
+    [company_id, godown_id, vendor_id, date]
   );
+
+  if (existing.rowCount) {
+    await client.query(
+      `
+      UPDATE kabadiwala_daily_balance
+      SET
+        previous_balance = $1,
+        purchase_amount = $2,
+        paid_amount = $3,
+        current_balance = $4,
+        updated_at = NOW()
+      WHERE id = $5
+      `,
+      [previous_balance, todayPurchase, todayPaid, current_balance, existing.rows[0].id]
+    );
+  } else {
+    await client.query(
+      `
+      INSERT INTO kabadiwala_daily_balance
+      (
+        id, company_id, godown_id, vendor_id, date,
+        previous_balance, purchase_amount, paid_amount, current_balance,
+        created_at, updated_at
+      )
+      VALUES
+      (uuid_generate_v4(), $1,$2,$3,$4::date,$5,$6,$7,$8,NOW(),NOW())
+      `,
+      [company_id, godown_id, vendor_id, date, previous_balance, todayPurchase, todayPaid, current_balance]
+    );
+  }
 }
 
 /* ============================================================
@@ -140,12 +160,15 @@ router.post("/add", async (req, res) => {
     const paid = Number(payment_amount);
 
     if (paid > 0) {
-      await client.query(
+      const payInsert = await client.query(
         `INSERT INTO kabadiwala_payments
          (id, kabadiwala_id, amount, mode, note, date, created_at)
-         VALUES (uuid_generate_v4(),$1,$2,$3,$4,$5,NOW())`,
+         VALUES (uuid_generate_v4(),$1,$2,$3,$4,$5,NOW())
+         RETURNING id`,
         [kabadi_id, paid, payment_mode, note, date]
       );
+
+      const paymentId = payInsert.rows[0].id;
 
       /* 🔻 ROKADI DEBIT */
       const rokadiType =
@@ -160,18 +183,25 @@ router.post("/add", async (req, res) => {
 
       const rokadiAccountId = rRes.rows[0].id;
 
+      const displayRef = `Payment to ${kabadiwala_name}`;
+      const displayRefVal = displayRef && String(displayRef).trim() ? String(displayRef).trim() : null;
+      const txnId = randomUUID();
+      const internalRef = `kabadiwala_payment:${paymentId}`;
+      const metadata = {
+        source: "kabadiwala",
+        kabadiwala_id: kabadi_id,
+        payment_id: paymentId,
+        vendor_id,
+        note: displayRefVal,
+      };
+
       await client.query(
-        `INSERT INTO rokadi_transactions
-         (id, company_id, godown_id, account_id,
-          type, amount, category, reference, created_at)
-         VALUES (uuid_generate_v4(),$1,$2,$3,'debit',$4,'kabadiwala',$5,NOW())`,
-        [
-          company_id,
-          godown_id,
-          rokadiAccountId,
-          paid,
-          `Payment to ${kabadiwala_name}`,
-        ]
+        `
+        INSERT INTO rokadi_transactions
+          (id, company_id, godown_id, account_id, type, amount, category, reference, metadata, created_at)
+        VALUES ($1,$2,$3,$4,'debit',$5,'kabadiwala',$6,$7::jsonb,NOW())
+        `,
+        [txnId, company_id, godown_id, rokadiAccountId, paid, internalRef, JSON.stringify(metadata)]
       );
 
       await client.query(
@@ -222,12 +252,15 @@ router.post("/withdrawal", async (req, res) => {
       [company_id, godown_id, vendor_id, vendor_name, date, mode]
     );
 
-    await client.query(
+    const payInsert = await client.query(
       `INSERT INTO kabadiwala_payments
        (id, kabadiwala_id, amount, mode, note, date, created_at)
-       VALUES (uuid_generate_v4(),$1,$2,$3,$4,$5,NOW())`,
+       VALUES (uuid_generate_v4(),$1,$2,$3,$4,$5,NOW())
+       RETURNING id`,
       [placeholder.rows[0].id, amount, mode, note, date]
     );
+
+    const paymentId = payInsert.rows[0].id;
 
     const rokadiType = mode === "cash" ? "cash" : "bank";
 
@@ -239,17 +272,29 @@ router.post("/withdrawal", async (req, res) => {
 
     const rokadiAccountId = rRes.rows[0].id;
 
+    const payDisplayRef = `Payment to ${vendor_name}`;
+    const payDisplayRefVal = payDisplayRef && String(payDisplayRef).trim() ? String(payDisplayRef).trim() : null;
+    const internalRef = paymentId ? `kabadiwala_payment:${paymentId}` : `kabadiwala_payment:${randomUUID()}`;
+    const metadata = {
+      source: "kabadiwala",
+      kabadiwala_id: placeholder.rows[0].id,
+      payment_id: paymentId || null,
+      vendor_id,
+      note: payDisplayRefVal,
+    };
     await client.query(
       `INSERT INTO rokadi_transactions
        (id, company_id, godown_id, account_id,
-        type, amount, category, reference, created_at)
-       VALUES (uuid_generate_v4(),$1,$2,$3,'debit',$4,'kabadiwala',$5,NOW())`,
+        type, amount, category, reference, metadata, created_at)
+       VALUES ($1,$2,$3,$4,'debit',$5,'kabadiwala',$6,$7::jsonb,NOW())`,
       [
+        randomUUID(),
         company_id,
         godown_id,
         rokadiAccountId,
         amount,
-        `Payment to ${vendor_name}`,
+        internalRef,
+        JSON.stringify(metadata),
       ]
     );
 
